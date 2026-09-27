@@ -1,0 +1,18 @@
+Thư mục này dùng để chứa ẢNH MẪU THẬT copy từ repo tham chiếu:
+  https://github.com/viraj7/Computer-Vision-Image-processing
+
+Các file ảnh có sẵn trong repo đó: chess.jpg, horse.jpg, monument.jpg,
+pyramid.jpg, reindeer.jpg, scene.jpg, starfish.jpg.
+
+Cách dùng:
+  1. Tải 1 (hoặc nhiều) ảnh ở trên, đặt vào thư mục này.
+  2. Trong config.yaml, set:
+       data:
+         source: repo_sample
+         sample_input_file: "<ten_file>.jpg"   # vd "chess.jpg"
+
+Nếu bạn CHƯA làm bước trên, data/loader.py sẽ tự sinh 1 ảnh grayscale
+placeholder (gradient + checkerboard, 256x256, deterministic) để
+stage6_benchmark/bench.py vẫn chạy end-to-end được -- sẽ có cảnh báo (WARNING) khi chạy.
+
+File này chỉ là placeholder, có thể xoá sau khi đã thêm ảnh thật.

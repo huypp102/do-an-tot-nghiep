@@ -1,0 +1,33 @@
+# Bắt buộc để chạy `python stage6_benchmark/bench.py` end-to-end (kể cả với dummy logic)
+numpy>=1.24
+pyyaml>=6.0
+
+# Chỉ cần khi target.mode = file | repo (stage0_graph/ -- Stage 0: PSG/PCG/FuncRank).
+# KHÔNG cần cho target.mode = function (mặc định): stage6_benchmark/bench.py chỉ
+# import stage0_graph/ theo kiểu "lazy" bên trong nhánh xử lý file/repo, nên thiếu
+# 2 gói dưới đây vẫn chạy mode=function bình thường.
+tree-sitter>=0.23        # parser thật theo đúng thiết kế Stage 0 chính thức
+tree-sitter-python>=0.23 # grammar Python cho tree-sitter
+networkx>=3.0             # PageRank cho FuncRank (stage0_graph/rank.py)
+# Nếu tree-sitter/tree-sitter-python khó cài trên máy bạn (hiếm khi cần
+# compiler -- PyPI có sẵn wheel cho hầu hết Windows/Linux/macOS hiện đại),
+# stage0_graph/builder.py TỰ ĐỘNG fallback sang module `ast` chuẩn của Python (không
+# cần cài gì thêm) -- xem cảnh báo log khi chạy và ghi chú trong README.md.
+
+# Chỉ cần khi graph.build_mode = dynamic (PCG động theo POLO, stage1_profiling/dynamic_profiler.py).
+# KHÔNG cần cho graph.build_mode = static (mặc định).
+scalene>=1.5              # công cụ đã chốt cho Stage 1 (thay Callgrind, chạy được trên Windows)
+# Nếu module `scalene` không import được (chưa cài, hoặc lỗi tương thích
+# Windows với sampling profiler mức thấp ở 1 số bản), stage1_profiling/dynamic_profiler.py
+# TỰ ĐỘNG fallback sang cProfile (có sẵn trong Python, không cần cài).
+# LƯU Ý (đã kiểm chứng thực tế): nếu đường dẫn project chứa ký tự ngoài ASCII
+# (vd "đồ án"), cần biến môi trường PYTHONUTF8=1 để Scalene chạy được trên
+# Windows -- stage1_profiling/dynamic_profiler.py đã tự set biến này khi gọi subprocess.
+
+# Tuỳ chọn -- chỉ cần khi dùng nhánh tương ứng:
+# pillow          # đọc ảnh mẫu thật (data.source=repo_sample, sample_input_file != null)
+# scikit-image    # data.source=library_dataset, library_dataset_backend=skimage
+# torchvision     # data.source=library_dataset, library_dataset_backend=torchvision
+# maturin         # build extension Rust cho hybrid_pyo3 / rust_pure/pyo3_ext (`maturin develop --release`)
+# anthropic       # nếu hiện thực ApiModelBackend bằng Anthropic SDK trong stage4_llm_transpile/model_backend.py
+# requests        # nếu hiện thực LocalModelBackend gọi Ollama/vLLM qua HTTP

@@ -1,0 +1,6 @@
+# Virtualenv tạo trên ổ D (ổ C hết dung lượng nên không cài package trực
+# tiếp vào Python hệ thống được) -- xem benchmark/README.md.
+.venv/
+.pip_cache/
+.pip_tmp/
+.scratch/

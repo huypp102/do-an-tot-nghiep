@@ -1,0 +1,15 @@
+[package]
+name = "rust_pure"
+version = "0.1.0"
+edition = "2021"
+
+# TODO: khi điền logic thật, có thể cần thêm:
+#   image = "0.25"      # đọc/ghi ảnh thật (thay vì chỉ nhận width/height qua CLI)
+#   ndarray = "0.16"    # thao tác mảng nhiều chiều tiện hơn Vec<u8> thô
+# Bản scaffold hiện tại KHÔNG phụ thuộc crate ngoài, để `cargo build --release`
+# chạy được ngay cả khi máy chưa có sẵn cache crates.io.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

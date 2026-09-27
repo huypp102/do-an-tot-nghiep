@@ -1,0 +1,24 @@
+[package]
+name = "rust_pure_ext"
+version = "0.1.0"
+edition = "2021"
+
+# Crate RIÊNG với ../Cargo.toml (bản CLI "rust_pure" dùng src/main.rs, KHÔNG
+# đổi). Package này build bằng maturin thành extension PyO3 để gọi Rust
+# IN-PROCESS từ Python (xem versions/rust_pure/pipeline.py và
+# runner/bench.py). Đặt trong thư mục con riêng để không ảnh hưởng tới
+# `cargo build --release` của bản CLI (Cargo không tự động gộp 2 package độc
+# lập này trừ khi khai báo [workspace], mà ta không khai báo).
+[lib]
+name = "rust_pure_ext"
+crate-type = ["cdylib"]
+
+[dependencies]
+# TODO: chốt version pyo3 khớp Python đang dùng để benchmark, xem bảng tương
+# thích tại https://pyo3.rs . API `#[pymodule]` bên dưới (src/lib.rs) viết
+# cho pyo3 >= 0.20 (dùng Bound<'_, PyModule>).
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,59 @@
+# Chạy pipeline trên máy thuê GPU. Xem README.md mục "Chạy trên máy thuê GPU".
+#
+# Không có đường dẫn nào của máy cụ thể bị hardcode ở đây: mọi thứ đi qua
+# biến môi trường (đặt trong file .env cạnh file này, xem .env.example).
+
+services:
+  # --------------------------------------------------------------------
+  # Model local chạy trên GPU. Stage 4 gọi vào đây khi llm.backend=local.
+  # --------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      # Model đã pull nằm trong volume -> restart container không phải tải lại.
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # --------------------------------------------------------------------
+  # Pipeline chính (Stage 0..6).
+  # --------------------------------------------------------------------
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: benchmark
+    depends_on:
+      - ollama
+    environment:
+      # Trỏ vào TÊN SERVICE "ollama", KHÔNG phải localhost: bên trong
+      # container benchmark, localhost là chính nó, không sang được container
+      # ollama.
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2:1b}"
+      # Đường dẫn dataset BÊN TRONG container (khớp với volume mount bên dưới).
+      REPOTRANSBENCH_ROOT: "${REPOTRANSBENCH_ROOT:-/app/data/RepoTransBench/source_projects/Python}"
+      # Chỉ cần khi muốn chạy song song llm.backend=api. Để trống thì Stage 4
+      # nhánh api sẽ báo lỗi rõ ràng và pipeline vẫn chạy tiếp.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      PYTHONUTF8: "1"
+    volumes:
+      # Dataset do TEAMMATE tự tải về trên máy thuê GPU. Mặc định trỏ vào
+      # ./data/RepoTransBench (có thể chưa tồn tại -- lúc đó
+      # input/intake.py báo lỗi có hướng dẫn, KHÔNG traceback).
+      # Đổi bằng REPOTRANSBENCH_HOST_PATH trong .env nếu dataset nằm chỗ khác.
+      - ${REPOTRANSBENCH_HOST_PATH:-./data/RepoTransBench}:/app/data/RepoTransBench:ro
+      # Kết quả ghi ra ngoài host để xem/copy mà không cần vào container.
+      - ./results:/app/results
+
+volumes:
+  ollama_data:

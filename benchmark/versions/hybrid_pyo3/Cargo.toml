@@ -1,0 +1,23 @@
+[package]
+name = "hybrid_pyo3_ext"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "hybrid_pyo3_ext"
+crate-type = ["cdylib"]
+
+[dependencies]
+# TODO: chốt version pyo3 khớp với Python đang dùng để benchmark, xem bảng
+# tương thích tại https://pyo3.rs . API `#[pymodule]` bên dưới (src/lib.rs)
+# viết cho pyo3 >= 0.20 (dùng Bound<'_, PyModule>) -- nếu bạn ghim version
+# khác, có thể cần sửa chữ ký hàm `hybrid_pyo3_ext` trong lib.rs.
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# TODO (tuỳ chọn): thêm crate `numpy` để nhận/trả trực tiếp PyArray thay vì
+# Vec<u8> thô qua bytes, tránh copy dữ liệu qua lại giữa Python <-> Rust:
+# numpy = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true

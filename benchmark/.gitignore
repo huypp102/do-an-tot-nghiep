@@ -1,0 +1,42 @@
+# Rust build artifacts
+versions/rust_pure/target/
+versions/rust_pure/pyo3_ext/target/
+versions/hybrid_pyo3/target/
+*.pyd
+*.so
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Kết quả benchmark tự sinh (giữ thư mục, bỏ qua nội dung).
+# LƯU Ý: trong results/ có để lại 1 file mẫu mỗi loại (raw_, report_,
+# whole_scope_, graph_context_, pipeline_raw_, pipeline_summary_) làm ví dụ
+# định dạng đầu ra. Các file mẫu đó BỊ 2 DÒNG DƯỚI ĐÂY IGNORE nên KHÔNG đi
+# theo git -- teammate clone repo về sẽ không thấy chúng, phải tự chạy
+# bench.py/run_pipeline.py để sinh ra. Nếu muốn commit mẫu cho team xem,
+# dùng `git add -f <tên file>` hoặc chuyển mẫu vào 1 thư mục được whitelist.
+results/*.json
+results/*.md
+!results/README.txt
+
+# Script driver + output tạm khi chạy Scalene (stage1_profiling/dynamic_profiler.py)
+results/.dynamic_profile_tmp/
+
+# Repo do input/intake.py tự clone về (không commit code người khác vào repo này)
+data/cloned_repos/
+
+# Dataset (RepoTransBench) -- teammate tự tải về trên máy thuê GPU, KHÔNG
+# commit vào repo này (rất nặng, và không phải code của team).
+data/RepoTransBench/
+
+# Biến môi trường thật (có thể chứa API key). Bản mẫu .env.example thì commit.
+.env
+
+# Crate nháp Stage 5 dùng để `cargo check` code LLM sinh ra
+results/.stage5_scratch_crate/
+
+# Code Rust do Stage 4 (LLM) sinh ra -- xem lại rồi mới merge tay vào
+# versions/rust_pure/pyo3_ext/src/lib.rs, không commit thẳng bản nháp.
+versions/rust_pure/pyo3_ext/generated/

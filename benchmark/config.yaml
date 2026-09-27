@@ -1,0 +1,204 @@
+# ============================================================================
+# Config cho benchmark 3 phiên bản: Python thuần / Rust thuần / Hybrid PyO3
+# Đồ án: hệ thống tự động transpile Python -> Rust cho hàm tiền xử lý ảnh AI
+# Case study nguồn: github.com/viraj7/Computer-Vision-Image-processing
+# ============================================================================
+
+data:
+  # "repo_sample"     : ảnh mẫu đặt trong data/sample_input/ (copy từ repo viraj7,
+  #                      vd chess.jpg, horse.jpg, monument.jpg, pyramid.jpg,
+  #                      reindeer.jpg, scene.jpg, starfish.jpg).
+  # "library_dataset" : ảnh lấy từ skimage.data hoặc torchvision.datasets, dùng để
+  #                      kiểm tra tương thích định dạng input với các hàm gốc.
+  source: repo_sample
+
+  sample_input_dir: data/sample_input
+  # Đã tải sẵn 7 ảnh thật từ repo viraj7 vào sample_input_dir (chess.jpg,
+  # horse.jpg, monument.jpg, pyramid.jpg, reindeer.jpg, scene.jpg,
+  # starfish.jpg). Đổi tên file ở đây để bench với ảnh khác.
+  # Để trống (null) -> loader tự sinh ảnh placeholder xám (grayscale) để demo end-to-end.
+  sample_input_file: chess.jpg
+
+  # Dùng khi source == library_dataset.
+  library_dataset_name: camera        # skimage: camera | coins | astronaut | checkerboard | moon | page
+  library_dataset_backend: skimage    # skimage | torchvision
+
+# ----------------------------------------------------------------------------
+# Stage 4 -- LLM transpile (stage4_llm_transpile/). CHỈ dùng bởi run_pipeline.py.
+# stage6_benchmark/bench.py chạy độc lập KHÔNG bao giờ đụng tới mục này.
+# ----------------------------------------------------------------------------
+llm:
+  # MẶC ĐỊNH TẮT: pipeline cũ (điền tay code Rust vào versions/) vẫn chạy y
+  # hệt khi false -- không ai bị bắt buộc phải có LLM mới dùng được benchmark.
+  enabled: false
+  backend: api             # api (Anthropic) | local (server OpenAI-compatible, vd Ollama)
+  # 1 = chỉ Generator Agent (bước quyết định accept/reject dùng RULE đơn giản:
+  #     accept nếu speedup rust_pure/python_pure > 1.0, dừng sau 1 vòng).
+  # 2 = thêm Decision Agent bằng LLM (phỏng theo POLO Fig.5) để quyết định
+  #     accept/reject + có tiếp tục tối ưu không.
+  num_agents: 1
+  api:
+    model: claude-sonnet-4-5-20250929
+    # API key LUÔN đọc từ biến môi trường ANTHROPIC_API_KEY -- KHÔNG bao giờ
+    # ghi key vào file này.
+  local:
+    # MẶC ĐỊNH trỏ vào tên service "ollama" trong docker-compose network.
+    # Bên TRONG container benchmark, "localhost" trỏ về chính container đó,
+    # KHÔNG sang được container ollama -- phải dùng tên service.
+    # Chạy ngoài Docker (trên máy cá nhân): set biến môi trường
+    #   OLLAMA_BASE_URL=http://localhost:11434
+    base_url: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+    model: "${OLLAMA_MODEL:-llama3.2:1b}"
+
+# Stage 2 -- Decision Gate (stage2_decision_gate/gate.py): pre-filter hotspot
+# trước khi đưa qua Stage 3/4. KHÁC Decision Agent ở Stage 6 (accept/reject
+# SAU khi đã dịch và đo tốc độ).
+decision_gate:
+  enabled: true
+
+# ----------------------------------------------------------------------------
+# Stage 5 -- Compiler-in-the-loop: biên dịch code Rust do LLM sinh, phân loại
+# lỗi, gửi lại Generator Agent sửa (tối đa max_retries vòng).
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Stage 6 -- Vòng tối ưu TỐC ĐỘ (khác hẳn vòng sửa lỗi biên dịch ở Stage 5).
+# Mỗi vòng: đo tốc độ -> Decision Agent quyết accept/reject + continue/stop
+# -> nếu continue thì Generator Agent tối ưu tiếp theo chiến lược nó đề xuất.
+# ----------------------------------------------------------------------------
+optimization_loop:
+  # TRẦN CỨNG. Decision Agent được dừng SỚM hơn, nhưng dù nó có đề xuất
+  # "CONTINUE" bao nhiêu lần đi nữa thì tới vòng này là ép dừng.
+  max_rounds: 3
+  # Timeout cho `maturin develop --release` giữa các vòng. Build Rust bản
+  # release có thể chậm, nhất là lần đầu phải tải crate về.
+  build_timeout_sec: 300
+
+# ----------------------------------------------------------------------------
+# Kiểm tra ĐÚNG ĐẮN (correctness): so khớp output Python vs Rust.
+# Chạy SAU Stage 5, TRƯỚC Stage 6 -- hàm nào MISMATCH thì KHÔNG được đem đi
+# đo tốc độ (đo tốc độ của bản dịch sai là vô nghĩa).
+# ----------------------------------------------------------------------------
+correctness:
+  enabled: true
+  rtol: 0.00001    # 1e-5, cho np.allclose / math.isclose
+  atol: 0.00000001 # 1e-8
+
+compiler_loop:
+  enabled: true
+  # Số lần gọi lại Generator Agent để sửa lỗi biên dịch, TRƯỚC khi bỏ cuộc.
+  max_retries: 3
+  # Lệnh kiểm tra biên dịch. `cargo check` nhanh hơn `cargo build` vì không
+  # sinh binary, đủ để bắt lỗi cú pháp/kiểu/borrow-checker.
+  cargo_timeout_sec: 300
+
+# ----------------------------------------------------------------------------
+# Dataset đánh giá quy mô lớn (RepoTransBench). KHÔNG hardcode đường dẫn máy
+# nào: đọc từ biến môi trường trước, giá trị sau ":-" chỉ là dự phòng khi
+# biến chưa được set (xem config_loader.py::expand_env_vars).
+#
+# Trên máy thuê GPU, teammate chỉ cần:
+#     export REPOTRANSBENCH_ROOT=/app/data/RepoTransBench/source_projects/Python
+# hoặc để nguyên mặc định và mount dataset vào đúng đường dẫn đó qua
+# REPOTRANSBENCH_HOST_PATH trong .env (xem docker-compose.yml).
+# ----------------------------------------------------------------------------
+dataset:
+  # false = bỏ qua hẳn, pipeline chạy trên target đơn lẻ như bình thường.
+  enabled: false
+  source_root: "${REPOTRANSBENCH_ROOT:-/app/data/RepoTransBench/source_projects/Python}"
+  # Giới hạn số repo đem chạy (0 = không giới hạn). Hữu ích khi thử nghiệm
+  # trước trên vài repo thay vì cả dataset.
+  max_repos: 0
+
+# ----------------------------------------------------------------------------
+# [LEGACY] Mục cũ, giữ lại để không phá config của ai đang dùng. Stage 4 mới
+# (stage4_llm_transpile/) đọc mục `llm:` ở trên, KHÔNG đọc mục này.
+# ----------------------------------------------------------------------------
+model_backend:
+  # "api"  : gọi LLM qua API (Anthropic/OpenAI/...), đọc API key từ biến môi trường.
+  # "local": gọi model local qua endpoint nội bộ (vd Ollama, vLLM).
+  provider: api
+
+  api:
+    # Tên biến môi trường chứa API key -- KHÔNG hard-code key vào file này.
+    api_key_env: ANTHROPIC_API_KEY
+    model_name: claude-sonnet-5
+    # TODO: điền base_url nếu dùng proxy nội bộ; để null nghĩa là dùng default của SDK.
+    base_url: null
+
+  local:
+    # TODO: điền endpoint model local thật (vd Ollama http://localhost:11434,
+    # hoặc vLLM OpenAI-compatible server).
+    endpoint: http://localhost:11434
+    model_name: codellama:13b
+
+benchmark:
+  iterations: 20
+  warmup: 5
+  # Chỉ dùng khi target.mode = "function" (xem bên dưới). Tên hàm cần đo,
+  # PHẢI khớp key trong PIPELINE_REGISTRY của versions/python_pure/pipeline.py
+  # và versions/hybrid_pyo3/pipeline.py. Ánh xạ sang file gốc trong repo
+  # viraj7 -- xem README.md mục "Ánh xạ hàm gốc".
+  functions:
+    - edge_det           # edge_detection.py -> Canny-style edge detection
+    - harris              # "harris corner detection.py" -> Harris corner detection
+    - hess_corner_det      # "hessian corner detection.py" -> Hessian corner detection
+    - im_threshold          # image_entropy.py -> entropy-based background/foreground split
+
+# Cấp độ benchmark -- xem README.md mục "3 cấp độ benchmark".
+target:
+  # "function" (MẶC ĐỊNH): dùng thẳng danh sách benchmark.functions ở trên,
+  #             y hệt hành vi trước khi có stage0_graph/ -- KHÔNG đổi gì.
+  # "file"    : trỏ target.source vào 1 file .py, tự phát hiện + xếp hạng hàm
+  #             hotspot bằng stage0_graph/ (PCG/PSG + FuncRank) thay cho danh
+  #             sách cứng.
+  # "repo"    : trỏ target.source vào 1 thư mục nhiều file .py, HOẶC 1 URL
+  #             GitHub (input/intake.py sẽ tự `git clone --depth 1` vào
+  #             data/cloned_repos/<tên_repo>/ rồi dùng bản local đó).
+  mode: function
+  # Bắt buộc khi mode=file|repo. Bỏ qua khi mode=function.
+  # Chấp nhận CẢ HAI dạng -- input/intake.py là nơi DUY NHẤT phân biệt:
+  #   - đường dẫn local:  data/reference_repo
+  #   - URL GitHub:       https://github.com/viraj7/Computer-Vision-Image-processing
+  # (Tên cũ `target.path` vẫn được đọc để tương thích ngược, nhưng sẽ có
+  # cảnh báo deprecation -- nên đổi sang `source`.)
+  source: null
+
+# Chỉ dùng khi target.mode = file | repo -- điều khiển stage0_graph/builder.py
+# (PCG/PSG), stage0_graph/rank.py (FuncRank), stage1_profiling/dynamic_profiler.py.
+graph:
+  # Số hàm hotspot (theo FuncRank) được chọn làm ứng viên benchmark.
+  top_k_hotspots: 5
+
+  # "static"  (MẶC ĐỊNH, hành vi CŨ giữ nguyên): PCG chỉ từ phân tích tĩnh
+  #            (tree-sitter/ast), FuncRank = PageRank thuần trên cấu trúc
+  #            liên kết. Không chạy profiling, không cần Scalene.
+  # "dynamic": build PCG ĐỘNG theo phương pháp POLO (Bai et al., IJCAI-25,
+  #            Section 3.1) -- chạy target dưới profiling với ảnh mẫu thật,
+  #            đo % thời gian + số lần gọi thật mỗi hàm/mỗi cạnh gọi hàm,
+  #            FuncRank dùng công thức Eq.1-2 của POLO (stage0_graph/rank.py::
+  #            func_rank_dynamic). Hàm KHÔNG được thực thi trong lần
+  #            profiling (không có implementation, hoặc code path không
+  #            chạy tới) tự động fallback về điểm tĩnh (rank_source=
+  #            "static_fallback") -- xem README mục "PCG động vs tĩnh".
+  build_mode: static
+
+  # Chỉ dùng khi build_mode = dynamic.
+  dynamic:
+    # "scalene" (đã chốt cho Stage 1, đồng bộ công cụ) hoặc "cprofile" (thay
+    # thế tạm, tự động dùng nếu chưa cài được Scalene -- xem
+    # stage1_profiling/dynamic_profiler.py). Trường này chỉ mang tính ghi chú/tài liệu;
+    # việc chọn profiler thực tế là TỰ ĐỘNG (thử Scalene trước, cProfile
+    # fallback nếu module `scalene` không import được).
+    profiler: scalene
+    # Số lần lặp workload (ảnh mẫu thật trong data/sample_input/) khi
+    # profiling động -- càng nhiều, số liệu count/time càng ổn định, nhưng
+    # cũng chạy Scalene lâu hơn.
+    workload_iterations: 20
+
+paths:
+  results_dir: results
+  # rust_pure được đo IN-PROCESS qua extension PyO3 (không phải subprocess
+  # binary nữa -- xem versions/rust_pure/pipeline.py). Build bằng:
+  #   cd versions/rust_pure/pyo3_ext && maturin develop --release
+  # Không cần khai báo path ở đây: sau khi `maturin develop` cài extension
+  # vào venv, Python tự import được `rust_pure_ext`, giống hybrid_pyo3_ext.
