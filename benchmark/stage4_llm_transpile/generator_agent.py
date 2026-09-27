@@ -200,15 +200,21 @@ class GeneratorAgent:
     agent_session.py).
     """
 
-    def __init__(self, backend, output_dir: Path | None = None) -> None:
+    def __init__(
+        self, backend, output_dir: Path | None = None, model: str | None = None
+    ) -> None:
         from stage4_llm_transpile.agent_session import AgentSession
 
         self.backend = backend
         self.output_dir = output_dir
+        # `model` = llm.<backend>.generator_model. Thường là model CHUYÊN SINH
+        # CODE (vd devstral:24b), khác model của Decision Agent.
+        self.model = model
         self.session = AgentSession(
             role_name="generator",
             system_prompt=GENERATOR_SYSTEM_PROMPT,
             backend=backend,
+            model=model,
         )
 
     def _send_and_parse(self, function_name: str, prompt: str) -> dict[str, Any]:

@@ -37,8 +37,15 @@ llm:
   # 2 = thêm Decision Agent bằng LLM (phỏng theo POLO Fig.5) để quyết định
   #     accept/reject + có tiếp tục tối ưu không.
   num_agents: 1
+  # HAI VAI TRÒ, HAI MODEL KHÁC NHAU.
+  # Generator Agent (sinh/sửa code Rust) và Decision Agent (đánh giá kết quả
+  # đo) dùng CHUNG 1 kết nối tới server, nhưng mỗi bên gọi model riêng:
+  # generator nên là model mạnh về code, decision có thể nhỏ hơn.
+  # Nếu chỉ khai báo `model:` (khoá cũ) thì cả 2 vai trò dùng chung model đó.
   api:
-    model: claude-sonnet-4-5-20250929
+    generator_model: claude-sonnet-4-5-20250929
+    decision_model: claude-sonnet-4-5-20250929
+    # Với backend=api thường 1 model là đủ, nên 2 dòng trên để giống nhau.
     # API key LUÔN đọc từ biến môi trường ANTHROPIC_API_KEY -- KHÔNG bao giờ
     # ghi key vào file này.
   local:
@@ -48,7 +55,11 @@ llm:
     # Chạy ngoài Docker (trên máy cá nhân): set biến môi trường
     #   OLLAMA_BASE_URL=http://localhost:11434
     base_url: "${OLLAMA_BASE_URL:-http://ollama:11434}"
-    model: "${OLLAMA_MODEL:-llama3.2:1b}"
+    # Nhớ pull CẢ HAI model về ollama trước khi chạy:
+    #   docker compose exec ollama ollama pull devstral:24b
+    #   docker compose exec ollama ollama pull qwen3:8b
+    generator_model: "${OLLAMA_GENERATOR_MODEL:-devstral:24b}"
+    decision_model: "${OLLAMA_DECISION_MODEL:-qwen3:8b}"
 
 # Stage 2 -- Decision Gate (stage2_decision_gate/gate.py): pre-filter hotspot
 # trước khi đưa qua Stage 3/4. KHÁC Decision Agent ở Stage 6 (accept/reject

@@ -43,11 +43,17 @@ class AgentSession:
         role_name: str,
         system_prompt: str,
         backend: Any,
+        model: str | None = None,
         max_history_turns: int = 12,
     ) -> None:
         self.role_name = role_name
         self.system_prompt = system_prompt
         self.backend = backend
+        # TÊN MODEL RIÊNG của vai trò này. Hai agent dùng chung `backend`
+        # (1 kết nối) nhưng mỗi bên gọi model của mình -- vd generator chạy
+        # devstral:24b, decision chạy qwen3:8b. None = dùng model mặc định
+        # của backend.
+        self.model = model
         self.max_history_turns = max_history_turns
         self._messages: list[dict[str, str]] = []
 
@@ -78,10 +84,11 @@ class AgentSession:
         đó lượt hỏng KHÔNG được ghi vào lịch sử, tránh làm bẩn ngữ cảnh)."""
         pending = self._messages + [{"role": "user", "content": content}]
         logger.info(
-            "[%s] gửi lượt thứ %d tới model (%d ký tự).",
-            self.role_name, len(pending) // 2 + 1, len(content),
+            "[%s] gửi lượt thứ %d tới model '%s' (%d ký tự).",
+            self.role_name, len(pending) // 2 + 1,
+            self.model or "(mặc định của backend)", len(content),
         )
-        reply = self.backend.chat(pending, system=self.system_prompt)
+        reply = self.backend.chat(pending, system=self.system_prompt, model=self.model)
 
         # Chỉ ghi vào lịch sử KHI gọi thành công.
         self._messages = pending + [{"role": "assistant", "content": reply}]

@@ -62,18 +62,29 @@ class ModelBackend(abc.ABC):
     name: str = "base"
 
     @abc.abstractmethod
-    def chat(self, messages: list[dict[str, str]], system: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        system: str | None = None,
+        model: str | None = None,
+    ) -> str:
         """Gửi cả lịch sử hội thoại `messages` (list {"role", "content"}) kèm
         `system` prompt (vai trò của agent), trả về text trả lời.
+
+        `model` là TÊN MODEL CHO RIÊNG LỜI GỌI NÀY. Nhờ vậy Generator Agent và
+        Decision Agent dùng CHUNG 1 instance backend (1 kết nối tới server)
+        nhưng vẫn chạy trên 2 MODEL KHÁC NHAU -- vd generator dùng model
+        chuyên code (devstral:24b), decision dùng model nhỏ hơn thiên về suy
+        luận (qwen3:8b). `None` thì dùng model mặc định của backend.
 
         Raise `ModelBackendError` nếu không gọi được."""
         raise NotImplementedError
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, model: str | None = None) -> str:
         """Lời gọi MỘT LƯỢT, không lịch sử, không vai trò -- tiện cho smoke
         test và cho code cũ. Agent thật nên dùng `AgentSession` để giữ lịch
         sử riêng, đừng dùng hàm này."""
-        return self.chat([{"role": "user", "content": prompt}])
+        return self.chat([{"role": "user", "content": prompt}], model=model)
 
 
 class ApiModelBackend(ModelBackend):
@@ -108,9 +119,15 @@ class ApiModelBackend(ModelBackend):
         self._client = anthropic.Anthropic(api_key=api_key)
         logger.info("ApiModelBackend sẵn sàng (model=%s).", self.model)
 
-    def chat(self, messages: list[dict[str, str]], system: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        system: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        model_name = model or self.model
         kwargs: dict = {
-            "model": self.model,
+            "model": model_name,
             "max_tokens": self.max_tokens,
             "messages": messages,
         }
@@ -122,7 +139,7 @@ class ApiModelBackend(ModelBackend):
             resp = self._client.messages.create(**kwargs)
         except Exception as exc:  # SDK có nhiều loại lỗi riêng -- gom hết về 1 mối
             raise ModelBackendError(
-                f"Gọi Anthropic API thất bại (model={self.model}): "
+                f"Gọi Anthropic API thất bại (model={model_name}): "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
@@ -133,7 +150,7 @@ class ApiModelBackend(ModelBackend):
         if not chunks:
             raise ModelBackendError(
                 f"Anthropic API trả về response không có nội dung text "
-                f"(model={self.model})."
+                f"(model={model_name})."
             )
         return "\n".join(chunks)
 
@@ -163,13 +180,20 @@ class LocalModelBackend(ModelBackend):
             "LocalModelBackend sẵn sàng (model=%s, base_url=%s).", self.model, self.base_url
         )
 
-    def chat(self, messages: list[dict[str, str]], system: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        system: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        model_name = model or self.model
         url = f"{self.base_url}/v1/chat/completions"
         # OpenAI-style: system prompt là MESSAGE ĐẦU TIÊN với role="system"
         # (khác Anthropic vốn nhận qua tham số riêng).
         full_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
+        logger.info("Gọi model local '%s' (%d message).", model_name, len(full_messages))
         payload = json.dumps({
-            "model": self.model,
+            "model": model_name,
             "messages": full_messages,
             "max_tokens": self.max_tokens,
             "stream": False,
@@ -203,29 +227,58 @@ class LocalModelBackend(ModelBackend):
             ) from exc
 
 
+GENERATOR_ROLE = "generator"
+DECISION_ROLE = "decision"
+
+
+def resolve_model_for_role(cfg: dict[str, Any], role: str) -> str:
+    """Tên model dùng cho VAI TRÒ `role` ("generator" | "decision").
+
+    Đọc `llm.<backend>.<role>_model`. Nếu chưa khai báo thì rơi về
+    `llm.<backend>.model` (khoá CŨ, dùng chung 1 model cho cả 2 vai trò) để
+    config cũ vẫn chạy được.
+
+    Nhờ tách theo vai trò, Generator Agent có thể chạy model chuyên sinh code
+    (vd devstral:24b) còn Decision Agent chạy model nhỏ hơn thiên về suy luận
+    (vd qwen3:8b), trên CÙNG 1 server local.
+    """
+    llm_cfg = cfg.get("llm") or {}
+    backend = (llm_cfg.get("backend") or "api").strip().lower()
+    section = llm_cfg.get(backend) or {}
+
+    model = section.get(f"{role}_model") or section.get("model")
+    if not model:
+        raise ModelBackendError(
+            f"Thiếu tên model cho vai trò '{role}': cần khai báo "
+            f"llm.{backend}.{role}_model (hoặc llm.{backend}.model dùng chung) "
+            "trong config.yaml."
+        )
+    return str(model)
+
+
 def get_model_backend(cfg: dict[str, Any]) -> ModelBackend:
     """Factory: đọc mục `llm:` trong config.yaml, trả về backend tương ứng.
+
+    Backend chỉ là ĐƯỜNG DÂY kết nối, model mặc định của nó lấy theo vai trò
+    generator. Tên model THẬT SỰ dùng cho mỗi lời gọi do AgentSession truyền
+    vào (xem `resolve_model_for_role` và `ModelBackend.chat(..., model=...)`),
+    nên 2 agent có thể chạy 2 model khác nhau qua cùng instance này.
 
     Raise `ModelBackendError` nếu cấu hình sai hoặc môi trường chưa sẵn sàng
     (thiếu key/package/server) -- caller bắt và xử lý, KHÔNG để crash pipeline.
     """
     llm_cfg = cfg.get("llm") or {}
     backend = (llm_cfg.get("backend") or "api").strip().lower()
+    default_model = resolve_model_for_role(cfg, GENERATOR_ROLE)
 
     if backend == "api":
-        api_cfg = llm_cfg.get("api") or {}
-        model = api_cfg.get("model")
-        if not model:
-            raise ModelBackendError("Thiếu llm.api.model trong config.yaml.")
-        return ApiModelBackend(model=model)
+        return ApiModelBackend(model=default_model)
 
     if backend == "local":
         local_cfg = llm_cfg.get("local") or {}
-        model = local_cfg.get("model")
-        if not model:
-            raise ModelBackendError("Thiếu llm.local.model trong config.yaml.")
         return LocalModelBackend(
-            model=model, base_url=local_cfg.get("base_url", "http://localhost:11434")
+            model=default_model,
+            base_url=local_cfg.get("base_url", "http://localhost:11434"),
         )
 
     raise ModelBackendError(f"llm.backend không hỗ trợ: {backend!r} (api | local)")

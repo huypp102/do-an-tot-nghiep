@@ -81,11 +81,18 @@ mỗi thành viên biết mình đang làm ở stage nào:
 | Chạy ở | Stage 4 và **Stage 5** (sửa lỗi biên dịch) | **Chỉ Stage 6**, sau khi đã compile + đo xong |
 | System prompt | riêng | riêng, khác hẳn |
 | Lịch sử hội thoại | riêng | riêng |
+| **Model** | `llm.<backend>.generator_model` | `llm.<backend>.decision_model` |
 
-Hai agent **dùng chung một kết nối** tới model (cùng `base_url`, cùng
-instance `ModelBackend`) nhưng **không bao giờ thấy lịch sử của nhau**. Mỗi
-agent giữ list `messages` riêng trong `AgentSession`; dữ liệu cần trao đổi
-(code, số liệu đo, chiến lược trước đó) truyền tường minh qua tham số hàm.
+Hai agent **dùng chung một kết nối** tới server (cùng `base_url`, cùng
+instance `ModelBackend`) nhưng **chạy hai model khác nhau** và **không bao
+giờ thấy lịch sử của nhau**. Mỗi agent giữ list `messages` riêng và tên model
+riêng trong `AgentSession`; dữ liệu cần trao đổi (code, số liệu đo, chiến
+lược trước đó) truyền tường minh qua tham số hàm.
+
+Tên model đi theo từng lời gọi (`ModelBackend.chat(..., model=...)`) chứ
+không cố định cho cả instance backend, nên cùng một server Ollama phục vụ
+được cả hai. Nếu config chỉ khai báo khoá cũ `model:` thì cả hai vai trò dùng
+chung model đó, giữ tương thích ngược.
 Đây là *role separation to avoid context entanglement* mà cả POLO lẫn
 RepoTransAgent đều làm. Chi tiết: `stage4_llm_transpile/agent_session.py`.
 
@@ -203,10 +210,13 @@ cp .env.example .env
 # 2. Dựng và chạy
 docker compose up -d
 
-# 3. Tải model về ollama (chỉ cần làm 1 lần, model nằm trong volume)
-docker compose exec ollama ollama pull llama3.2:1b
-#    Model lớn hơn cho kết quả tốt hơn, ví dụ:
-#    docker compose exec ollama ollama pull qwen2.5-coder:7b
+# 3. Tải CẢ HAI model về ollama (chỉ cần làm 1 lần, model nằm trong volume).
+#    Generator Agent và Decision Agent chạy 2 model KHÁC NHAU.
+docker compose exec ollama ollama pull devstral:24b   # Generator: sinh/sửa code Rust
+docker compose exec ollama ollama pull qwen3:8b       # Decision: đánh giá kết quả đo
+#    Máy yếu thì đổi sang model nhỏ hơn trong .env, ví dụ:
+#    OLLAMA_GENERATOR_MODEL=qwen2.5-coder:7b
+#    OLLAMA_DECISION_MODEL=llama3.2:3b
 
 # 4. Bật LLM trong config.yaml: llm.enabled: true, backend: local
 #    rồi chạy pipeline
@@ -232,7 +242,8 @@ export OLLAMA_BASE_URL=http://localhost:11434
 | `REPOTRANSBENCH_HOST_PATH` | Đường dẫn dataset **trên host**, để mount vào container | `./data/RepoTransBench` |
 | `REPOTRANSBENCH_ROOT` | Đường dẫn dataset **trong container** | `/app/data/RepoTransBench/source_projects/Python` |
 | `OLLAMA_BASE_URL` | Endpoint model local | `http://ollama:11434` |
-| `OLLAMA_MODEL` | Tên model local | `llama3.2:1b` |
+| `OLLAMA_GENERATOR_MODEL` | Model cho Generator Agent | `devstral:24b` |
+| `OLLAMA_DECISION_MODEL` | Model cho Decision Agent | `qwen3:8b` |
 | `ANTHROPIC_API_KEY` | Chỉ cần nếu muốn chạy `llm.backend: api` | (trống) |
 
 `config.yaml` đọc các biến này qua cú pháp `${BIẾN:-mặc định}`, xử lý trong

@@ -147,7 +147,12 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
         _banner("STAGE 3/4", "Đóng gói context (POLO Fig.5) + Generator Agent sinh Rust")
         from stage3_context_packaging.packager import package_context_for
         from stage4_llm_transpile.generator_agent import GeneratorAgent
-        from stage4_llm_transpile.model_backend import ModelBackendError, get_model_backend
+        from stage4_llm_transpile.model_backend import (
+            GENERATOR_ROLE,
+            ModelBackendError,
+            get_model_backend,
+            resolve_model_for_role,
+        )
 
         backend = None
         try:
@@ -176,6 +181,11 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
             }
             backend = None  # để khối dưới không chạy
 
+        generator_model = None
+        if backend is not None:
+            generator_model = resolve_model_for_role(cfg, GENERATOR_ROLE)
+            logger.info("Generator Agent dùng model: %s", generator_model)
+
         if backend is not None:
             profile_data = getattr(graph, "_dynamic_profile", None)
             for name in candidates:
@@ -183,7 +193,7 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
                 # MỖI hotspot 1 GeneratorAgent riêng -> session/lịch sử riêng.
                 # Giữ lại agent để Stage 5 nhờ đúng nó sửa lỗi biên dịch, nhờ
                 # vậy nó còn nhớ code vừa viết.
-                agent = GeneratorAgent(backend)
+                agent = GeneratorAgent(backend, model=generator_model)
                 generator_agents[name] = agent
                 result = agent.generate_rust(name, context)
                 transpile_results.append(result)
@@ -317,14 +327,22 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
             decision_backend = get_model_backend(cfg)
             # Session RIÊNG cho Decision Agent, TÁCH HẲN khỏi session của các
             # Generator Agent ở Stage 3/4. Hai vai trò dùng chung kết nối tới
-            # model nhưng KHÔNG thấy lịch sử hội thoại của nhau.
+            # server nhưng KHÔNG thấy lịch sử của nhau VÀ chạy 2 MODEL KHÁC
+            # NHAU (generator_model vs decision_model trong config.yaml).
             from stage4_llm_transpile.agent_session import AgentSession
             from stage4_llm_transpile.decision_agent import DECISION_SYSTEM_PROMPT
+            from stage4_llm_transpile.model_backend import (
+                DECISION_ROLE,
+                resolve_model_for_role,
+            )
 
+            decision_model = resolve_model_for_role(cfg, DECISION_ROLE)
+            logger.info("Decision Agent dùng model: %s", decision_model)
             decision_session = AgentSession(
                 role_name="decision",
                 system_prompt=DECISION_SYSTEM_PROMPT,
                 backend=decision_backend,
+                model=decision_model,
             )
         except ModelBackendError as exc:
             logger.error("Decision Agent: không có backend (%s) -- dùng rule.", exc)

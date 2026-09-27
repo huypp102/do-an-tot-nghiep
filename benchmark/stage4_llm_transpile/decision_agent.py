@@ -183,6 +183,7 @@ def decide_after_benchmark(
     session: Any | None = None,
     round_index: int = 1,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
+    model: str | None = None,
 ) -> AgentDecision:
     """HÀM CHÍNH.
 
@@ -226,6 +227,7 @@ def decide_after_benchmark(
             role_name="decision",
             system_prompt=DECISION_SYSTEM_PROMPT,
             backend=backend,
+            model=model,  # llm.<backend>.decision_model
         )
 
     speedup = compute_speedup(before_sec, after_sec)

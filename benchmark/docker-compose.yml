@@ -39,7 +39,9 @@ services:
       # container benchmark, localhost là chính nó, không sang được container
       # ollama.
       OLLAMA_BASE_URL: "http://ollama:11434"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2:1b}"
+      # Hai vai tro, hai model khac nhau -- nho pull ca hai (xem README).
+      OLLAMA_GENERATOR_MODEL: "${OLLAMA_GENERATOR_MODEL:-devstral:24b}"
+      OLLAMA_DECISION_MODEL: "${OLLAMA_DECISION_MODEL:-qwen3:8b}"
       # Đường dẫn dataset BÊN TRONG container (khớp với volume mount bên dưới).
       REPOTRANSBENCH_ROOT: "${REPOTRANSBENCH_ROOT:-/app/data/RepoTransBench/source_projects/Python}"
       # Chỉ cần khi muốn chạy song song llm.backend=api. Để trống thì Stage 4
