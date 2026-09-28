@@ -201,20 +201,27 @@ class GeneratorAgent:
     """
 
     def __init__(
-        self, backend, output_dir: Path | None = None, model: str | None = None
+        self,
+        backend,
+        output_dir: Path | None = None,
+        model: str | None = None,
+        num_ctx: int | None = None,
     ) -> None:
         from stage4_llm_transpile.agent_session import AgentSession
 
         self.backend = backend
         self.output_dir = output_dir
-        # `model` = llm.<backend>.generator_model. Thường là model CHUYÊN SINH
-        # CODE (vd devstral:24b), khác model của Decision Agent.
+        # `model` = llm.<backend>.generator_model -- model CHUYÊN SINH CODE,
+        # khác model của Decision Agent. `num_ctx` rộng hơn vì prompt chứa cả
+        # code lẫn context từ Stage 3.
         self.model = model
+        self.num_ctx = num_ctx
         self.session = AgentSession(
             role_name="generator",
             system_prompt=GENERATOR_SYSTEM_PROMPT,
             backend=backend,
             model=model,
+            num_ctx=num_ctx,
         )
 
     def _send_and_parse(self, function_name: str, prompt: str) -> dict[str, Any]:

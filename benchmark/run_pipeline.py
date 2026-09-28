@@ -182,9 +182,16 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
             backend = None  # để khối dưới không chạy
 
         generator_model = None
+        generator_num_ctx = None
         if backend is not None:
+            from stage4_llm_transpile.model_backend import resolve_num_ctx_for_role
+
             generator_model = resolve_model_for_role(cfg, GENERATOR_ROLE)
-            logger.info("Generator Agent dùng model: %s", generator_model)
+            generator_num_ctx = resolve_num_ctx_for_role(cfg, GENERATOR_ROLE)
+            logger.info(
+                "Generator Agent dùng model '%s' (num_ctx=%s).",
+                generator_model, generator_num_ctx or "(mặc định)",
+            )
 
         if backend is not None:
             profile_data = getattr(graph, "_dynamic_profile", None)
@@ -193,7 +200,9 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
                 # MỖI hotspot 1 GeneratorAgent riêng -> session/lịch sử riêng.
                 # Giữ lại agent để Stage 5 nhờ đúng nó sửa lỗi biên dịch, nhờ
                 # vậy nó còn nhớ code vừa viết.
-                agent = GeneratorAgent(backend, model=generator_model)
+                agent = GeneratorAgent(
+                    backend, model=generator_model, num_ctx=generator_num_ctx
+                )
                 generator_agents[name] = agent
                 result = agent.generate_rust(name, context)
                 transpile_results.append(result)
@@ -334,15 +343,25 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
             from stage4_llm_transpile.model_backend import (
                 DECISION_ROLE,
                 resolve_model_for_role,
+                resolve_num_ctx_for_role,
             )
 
             decision_model = resolve_model_for_role(cfg, DECISION_ROLE)
-            logger.info("Decision Agent dùng model: %s", decision_model)
+            decision_num_ctx = resolve_num_ctx_for_role(cfg, DECISION_ROLE)
+            logger.info(
+                "Decision Agent dùng model '%s' (num_ctx=%s).",
+                decision_model, decision_num_ctx or "(mặc định)",
+            )
             decision_session = AgentSession(
                 role_name="decision",
                 system_prompt=DECISION_SYSTEM_PROMPT,
                 backend=decision_backend,
                 model=decision_model,
+                num_ctx=decision_num_ctx,
+                # Tắt chế độ suy nghĩ: bản thân template đã yêu cầu trả lời
+                # ngắn gọn theo mẫu. Nếu server không hỗ trợ tham số này thì
+                # bộ lọc <think> ở decision_agent.py vẫn xử lý được.
+                think=False,
             )
         except ModelBackendError as exc:
             logger.error("Decision Agent: không có backend (%s) -- dùng rule.", exc)

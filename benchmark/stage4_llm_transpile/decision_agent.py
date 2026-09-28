@@ -153,9 +153,40 @@ def _apply_round_cap(
     return decision
 
 
+def strip_think_blocks(text: str) -> str:
+    """Bỏ toàn bộ khối <think>...</think> khỏi response.
+
+    VÌ SAO CẦN: model reasoning (qwen3, deepseek-r1, ...) hay "suy nghĩ ra
+    tiếng" trong thẻ <think>. Phần suy nghĩ đó thường cân nhắc cả hai hướng,
+    nên rất dễ chứa chữ REJECT hoặc CONTINUE dù KẾT LUẬN cuối cùng ngược lại.
+    Nếu parse trên nguyên văn, ta sẽ đọc nhầm suy nghĩ thành quyết định.
+
+    Xử lý luôn trường hợp thẻ đóng BỊ THIẾU (response bị cắt vì chạm giới hạn
+    token): khi đó cắt bỏ từ <think> tới hết chuỗi.
+    """
+    if not text:
+        return ""
+    # Khối đóng đầy đủ (DOTALL để bắt qua nhiều dòng).
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Thẻ mở còn sót lại = thẻ đóng bị cắt mất -> bỏ từ đó tới hết.
+    cleaned = re.sub(r"<think\b[^>]*>.*\Z", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    # Thẻ đóng mồ côi (hiếm, khi phần mở bị cắt ở đầu response).
+    cleaned = re.sub(r"</think\s*>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def _parse_llm_decision(text: str) -> tuple[bool, bool, str | None]:
     """Đọc (accepted, continue, next_strategy) từ response. Mặc định an toàn:
-    không parse được -> reject + stop, để không tự động nhận code đáng ngờ."""
+    không parse được -> reject + stop, để không tự động nhận code đáng ngờ.
+
+    LUÔN lọc khối <think> trước khi parse -- xem `strip_think_blocks`."""
+    raw_len = len(text or "")
+    text = strip_think_blocks(text)
+    if raw_len and len(text) < raw_len:
+        logger.info(
+            "Đã lọc khối <think> khỏi response Decision Agent (%d -> %d ký tự) "
+            "trước khi parse.", raw_len, len(text),
+        )
     decision_match = re.search(r"##\s*Decision\s*\n\s*(\w+)", text, flags=re.IGNORECASE)
     accepted = bool(decision_match) and decision_match.group(1).strip().upper() == "ACCEPT"
 

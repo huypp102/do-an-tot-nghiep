@@ -212,8 +212,8 @@ docker compose up -d
 
 # 3. Tải CẢ HAI model về ollama (chỉ cần làm 1 lần, model nằm trong volume).
 #    Generator Agent và Decision Agent chạy 2 model KHÁC NHAU.
-docker compose exec ollama ollama pull devstral:24b   # Generator: sinh/sửa code Rust
-docker compose exec ollama ollama pull qwen3:8b       # Decision: đánh giá kết quả đo
+docker compose exec ollama ollama pull devstral-small-2:latest  # Generator: sinh/sửa code Rust
+docker compose exec ollama ollama pull qwen3:14b                # Decision: đánh giá kết quả đo
 #    Máy yếu thì đổi sang model nhỏ hơn trong .env, ví dụ:
 #    OLLAMA_GENERATOR_MODEL=qwen2.5-coder:7b
 #    OLLAMA_DECISION_MODEL=llama3.2:3b
@@ -222,6 +222,62 @@ docker compose exec ollama ollama pull qwen3:8b       # Decision: đánh giá k�
 #    rồi chạy pipeline
 docker compose run --rm benchmark python run_pipeline.py
 ```
+
+### Kiểm tra sau khi chạy vài lượt
+
+Chạy pipeline vài lượt rồi kiểm tra hai thứ:
+
+```bash
+# 1. CẢ HAI model phải cùng ở trạng thái loaded
+docker compose exec ollama ollama ps
+
+# 2. Tổng VRAM nên dưới ~28GB
+nvidia-smi
+```
+
+Nếu `ollama ps` chỉ thấy **một** model tại một thời điểm, nghĩa là Ollama đang
+nạp rồi gỡ luân phiên hai model. Mỗi lần nạp lại tốn hàng chục giây và làm
+nhiễu số đo. Hai biến trong `docker-compose.yml` xử lý việc này:
+
+| Biến | Giá trị | Tác dụng |
+|---|---|---|
+| `OLLAMA_MAX_LOADED_MODELS` | `2` | Cho phép giữ hai model cùng lúc |
+| `OLLAMA_KEEP_ALIVE` | `30m` | Không gỡ model khỏi VRAM sau mỗi lượt |
+
+Nếu VRAM vượt ngưỡng, giảm `num_ctx` trước khi nghĩ tới việc đổi model nhỏ
+hơn. `num_ctx` ảnh hưởng gần như tuyến tính tới bộ nhớ KV cache.
+
+### Cửa sổ ngữ cảnh (`num_ctx`) theo vai trò
+
+| Vai trò | Mặc định | Lý do |
+|---|---|---|
+| Generator | `32768` | Prompt chứa code gốc và context từ Stage 3 |
+| Decision | `16384` | Chỉ nhận số liệu đo, hẹp hơn là đủ |
+
+Ollama **không báo lỗi** khi prompt dài quá `num_ctx`, nó lặng lẽ cắt bớt
+phần đầu, tức là mất system prompt và mất code gốc, khiến model trả lời lạc
+đề mà không ai biết vì sao. Backend tự ước lượng số token theo công thức
+`số ký tự / 3.5` và ghi log WARNING trước khi gửi nếu vượt ngưỡng. **Chỉ
+tăng `num_ctx` khi thực sự thấy cảnh báo đó**, đừng tăng phòng hờ.
+
+Lưu ý kỹ thuật: `num_ctx` chỉ truyền được qua API native của Ollama
+(`POST /api/chat`). Endpoint OpenAI-compatible `/v1/chat/completions` không
+chở được `options.num_ctx`. Vì vậy `llm.local.api_style` mặc định là
+`ollama`. Nếu dùng vLLM hay LM Studio thì đổi sang `openai`, khi đó `num_ctx`
+sẽ không có tác dụng và backend sẽ cảnh báo rõ.
+
+### Model reasoning và khối `<think>`
+
+`qwen3` là model reasoning, nó hay "suy nghĩ ra tiếng" trong thẻ
+`<think>...</think>`. Phần suy nghĩ thường cân nhắc cả hai hướng nên rất dễ
+chứa chữ `REJECT` dù kết luận cuối là `ACCEPT`. Hệ thống xử lý hai lớp:
+
+1. Gửi `think: false` trong request tới Ollama. Bản Ollama cũ không hiểu
+   tham số này sẽ trả HTTP 400, khi đó backend tự thử lại một lần không kèm
+   tham số đó.
+2. Luôn lọc sạch khối `<think>` trước khi parse, kể cả khi thẻ đóng bị mất do
+   response bị cắt giữa chừng. Việc parse `ACCEPT`/`REJECT`/`CONTINUE`/`STOP`
+   chỉ dựa trên phần còn lại.
 
 ### Vì sao `base_url` là `http://ollama:11434`
 

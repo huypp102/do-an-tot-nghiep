@@ -13,6 +13,12 @@ services:
     restart: unless-stopped
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      # Giữ CẢ HAI model (generator + decision) nằm sẵn trong VRAM, tránh
+      # nạp/gỡ liên tục mỗi lần đổi vai trò -- mỗi lần nạp lại tốn hàng
+      # chục giây và làm nhiễu số đo.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_KEEP_ALIVE: "30m"
     volumes:
       # Model đã pull nằm trong volume -> restart container không phải tải lại.
       - ollama_data:/root/.ollama
@@ -40,8 +46,10 @@ services:
       # ollama.
       OLLAMA_BASE_URL: "http://ollama:11434"
       # Hai vai tro, hai model khac nhau -- nho pull ca hai (xem README).
-      OLLAMA_GENERATOR_MODEL: "${OLLAMA_GENERATOR_MODEL:-devstral:24b}"
-      OLLAMA_DECISION_MODEL: "${OLLAMA_DECISION_MODEL:-qwen3:8b}"
+      OLLAMA_GENERATOR_MODEL: "${OLLAMA_GENERATOR_MODEL:-devstral-small-2:latest}"
+      OLLAMA_DECISION_MODEL: "${OLLAMA_DECISION_MODEL:-qwen3:14b}"
+      OLLAMA_GENERATOR_NUM_CTX: "${OLLAMA_GENERATOR_NUM_CTX:-32768}"
+      OLLAMA_DECISION_NUM_CTX: "${OLLAMA_DECISION_NUM_CTX:-16384}"
       # Đường dẫn dataset BÊN TRONG container (khớp với volume mount bên dưới).
       REPOTRANSBENCH_ROOT: "${REPOTRANSBENCH_ROOT:-/app/data/RepoTransBench/source_projects/Python}"
       # Chỉ cần khi muốn chạy song song llm.backend=api. Để trống thì Stage 4

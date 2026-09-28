@@ -55,11 +55,24 @@ llm:
     # Chạy ngoài Docker (trên máy cá nhân): set biến môi trường
     #   OLLAMA_BASE_URL=http://localhost:11434
     base_url: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+    # "ollama" -> gọi POST /api/chat (API native). BẮT BUỘC dùng kiểu này nếu
+    #             muốn đặt num_ctx theo từng lời gọi, vì endpoint
+    #             /v1/chat/completions KHÔNG chở được options.num_ctx.
+    # "openai" -> gọi POST /v1/chat/completions (cho vLLM, LM Studio, ...).
+    api_style: "${OLLAMA_API_STYLE:-ollama}"
     # Nhớ pull CẢ HAI model về ollama trước khi chạy:
-    #   docker compose exec ollama ollama pull devstral:24b
-    #   docker compose exec ollama ollama pull qwen3:8b
-    generator_model: "${OLLAMA_GENERATOR_MODEL:-devstral:24b}"
-    decision_model: "${OLLAMA_DECISION_MODEL:-qwen3:8b}"
+    #   docker compose exec ollama ollama pull devstral-small-2:latest
+    #   docker compose exec ollama ollama pull qwen3:14b
+    generator_model: "${OLLAMA_GENERATOR_MODEL:-devstral-small-2:latest}"
+    decision_model: "${OLLAMA_DECISION_MODEL:-qwen3:14b}"
+    # Cửa sổ ngữ cảnh riêng từng vai trò.
+    # CẢNH BÁO VRAM: tăng num_ctx làm tăng bộ nhớ cho KV cache gần như tuyến
+    # tính. CHỈ tăng khi thực sự thấy log cảnh báo prompt bị cắt
+    # ("Ollama sẽ CẮT BỚT phần đầu"), đừng tăng phòng hờ.
+    # Generator cần rộng hơn vì prompt chứa code + context từ Stage 3;
+    # Decision chỉ nhận số liệu đo nên hẹp hơn là đủ.
+    generator_num_ctx: "${OLLAMA_GENERATOR_NUM_CTX:-32768}"
+    decision_num_ctx: "${OLLAMA_DECISION_NUM_CTX:-16384}"
 
 # Stage 2 -- Decision Gate (stage2_decision_gate/gate.py): pre-filter hotspot
 # trước khi đưa qua Stage 3/4. KHÁC Decision Agent ở Stage 6 (accept/reject

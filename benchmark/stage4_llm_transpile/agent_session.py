@@ -44,6 +44,8 @@ class AgentSession:
         system_prompt: str,
         backend: Any,
         model: str | None = None,
+        num_ctx: int | None = None,
+        think: bool | None = None,
         max_history_turns: int = 12,
     ) -> None:
         self.role_name = role_name
@@ -54,6 +56,12 @@ class AgentSession:
         # devstral:24b, decision chạy qwen3:8b. None = dùng model mặc định
         # của backend.
         self.model = model
+        # Cửa sổ ngữ cảnh riêng cho vai trò này: generator cần lớn hơn vì
+        # prompt chứa code + context; decision chỉ cần số liệu đo nên nhỏ hơn,
+        # tiết kiệm VRAM cho KV cache.
+        self.num_ctx = num_ctx
+        # think=False để model reasoning (vd qwen3) không sinh khối <think>.
+        self.think = think
         self.max_history_turns = max_history_turns
         self._messages: list[dict[str, str]] = []
 
@@ -88,7 +96,13 @@ class AgentSession:
             self.role_name, len(pending) // 2 + 1,
             self.model or "(mặc định của backend)", len(content),
         )
-        reply = self.backend.chat(pending, system=self.system_prompt, model=self.model)
+        reply = self.backend.chat(
+            pending,
+            system=self.system_prompt,
+            model=self.model,
+            num_ctx=self.num_ctx,
+            think=self.think,
+        )
 
         # Chỉ ghi vào lịch sử KHI gọi thành công.
         self._messages = pending + [{"role": "assistant", "content": reply}]

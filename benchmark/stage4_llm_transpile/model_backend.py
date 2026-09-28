@@ -67,6 +67,8 @@ class ModelBackend(abc.ABC):
         messages: list[dict[str, str]],
         system: str | None = None,
         model: str | None = None,
+        num_ctx: int | None = None,
+        think: bool | None = None,
     ) -> str:
         """Gửi cả lịch sử hội thoại `messages` (list {"role", "content"}) kèm
         `system` prompt (vai trò của agent), trả về text trả lời.
@@ -74,8 +76,13 @@ class ModelBackend(abc.ABC):
         `model` là TÊN MODEL CHO RIÊNG LỜI GỌI NÀY. Nhờ vậy Generator Agent và
         Decision Agent dùng CHUNG 1 instance backend (1 kết nối tới server)
         nhưng vẫn chạy trên 2 MODEL KHÁC NHAU -- vd generator dùng model
-        chuyên code (devstral:24b), decision dùng model nhỏ hơn thiên về suy
-        luận (qwen3:8b). `None` thì dùng model mặc định của backend.
+        chuyên code, decision dùng model thiên về suy luận. `None` thì dùng
+        model mặc định của backend.
+
+        `num_ctx`: kích thước cửa sổ ngữ cảnh cho riêng lời gọi này (chỉ có
+        tác dụng với backend local dùng API native của Ollama).
+        `think`: tắt/bật chế độ suy nghĩ của model reasoning (Ollama). None
+        nghĩa là để mặc định của model.
 
         Raise `ModelBackendError` nếu không gọi được."""
         raise NotImplementedError
@@ -124,7 +131,11 @@ class ApiModelBackend(ModelBackend):
         messages: list[dict[str, str]],
         system: str | None = None,
         model: str | None = None,
+        num_ctx: int | None = None,
+        think: bool | None = None,
     ) -> str:
+        # num_ctx/think là khái niệm của Ollama; Anthropic API không có tương
+        # đương nên bỏ qua (cửa sổ ngữ cảnh do model quy định).
         model_name = model or self.model
         kwargs: dict = {
             "model": model_name,
@@ -166,45 +177,58 @@ class LocalModelBackend(ModelBackend):
         base_url: str = "http://localhost:11434",
         max_tokens: int = DEFAULT_MAX_TOKENS,
         timeout: int = DEFAULT_TIMEOUT_SEC,
+        api_style: str = "ollama",
     ) -> None:
         self.model = model
         self.base_url = (base_url or "").rstrip("/")
         self.max_tokens = max_tokens
         self.timeout = timeout
+        # "ollama" -> POST /api/chat   (native, CHỞ ĐƯỢC options.num_ctx + think)
+        # "openai" -> POST /v1/chat/completions (tương thích vLLM/LM Studio,
+        #             nhưng KHÔNG chở được num_ctx -- Ollama bỏ qua field lạ)
+        self.api_style = (api_style or "ollama").strip().lower()
         if not self.base_url:
             raise ModelBackendError(
                 "llm.local.base_url rỗng -- cần điền endpoint server local "
                 "(vd http://localhost:11434) trong config.yaml."
             )
         logger.info(
-            "LocalModelBackend sẵn sàng (model=%s, base_url=%s).", self.model, self.base_url
+            "LocalModelBackend sẵn sàng (model=%s, base_url=%s, api_style=%s).",
+            self.model, self.base_url, self.api_style,
         )
 
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        system: str | None = None,
-        model: str | None = None,
-    ) -> str:
-        model_name = model or self.model
-        url = f"{self.base_url}/v1/chat/completions"
-        # OpenAI-style: system prompt là MESSAGE ĐẦU TIÊN với role="system"
-        # (khác Anthropic vốn nhận qua tham số riêng).
-        full_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
-        logger.info("Gọi model local '%s' (%d message).", model_name, len(full_messages))
-        payload = json.dumps({
-            "model": model_name,
-            "messages": full_messages,
-            "max_tokens": self.max_tokens,
-            "stream": False,
-        }).encode("utf-8")
+    def _warn_if_prompt_too_long(
+        self, full_messages: list[dict[str, str]], num_ctx: int | None, model_name: str
+    ) -> None:
+        """Ước lượng thô số token (≈ ký tự / 3.5) và cảnh báo nếu vượt num_ctx.
 
+        Ollama KHÔNG báo lỗi khi prompt dài quá cửa sổ ngữ cảnh -- nó lặng lẽ
+        CẮT BỚT phần đầu. Mất phần đầu nghĩa là mất system prompt và mất code
+        gốc, và model sẽ trả lời lạc đề mà không ai biết vì sao. Nên phải tự
+        cảnh báo ở đây.
+        """
+        if not num_ctx:
+            return
+        n_chars = sum(len(m.get("content") or "") for m in full_messages)
+        est_tokens = int(n_chars / 3.5)
+        if est_tokens > num_ctx:
+            logger.warning(
+                "Prompt gửi model '%s' ước tính %d token (%d ký tự / 3.5) > "
+                "num_ctx=%d -> Ollama sẽ CẮT BỚT phần đầu mà không báo lỗi. "
+                "Hậu quả: mất system prompt / mất code gốc, model trả lời lạc "
+                "đề. Cách xử lý: tăng num_ctx cho vai trò này (tốn thêm VRAM "
+                "cho KV cache) hoặc giảm lượng context đưa vào prompt.",
+                model_name, est_tokens, n_chars, num_ctx,
+            )
+
+    def _post_json(self, url: str, payload: dict) -> str:
+        data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                return resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500] if exc.fp else ""
             raise ModelBackendError(
@@ -217,13 +241,82 @@ class LocalModelBackend(ModelBackend):
                 "trong config.yaml."
             ) from exc
 
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        system: str | None = None,
+        model: str | None = None,
+        num_ctx: int | None = None,
+        think: bool | None = None,
+    ) -> str:
+        model_name = model or self.model
+        # Cả 2 kiểu API đều nhận system prompt là message đầu tiên
+        # (khác Anthropic vốn nhận qua tham số riêng).
+        full_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
+        logger.info(
+            "Gọi model local '%s' (%d message, num_ctx=%s, think=%s).",
+            model_name, len(full_messages),
+            num_ctx if num_ctx else "(mặc định của model)",
+            "(mặc định)" if think is None else think,
+        )
+        self._warn_if_prompt_too_long(full_messages, num_ctx, model_name)
+
+        if self.api_style == "openai":
+            if num_ctx:
+                logger.warning(
+                    "api_style=openai nên num_ctx=%d KHÔNG có tác dụng: endpoint "
+                    "/v1/chat/completions không chở được options.num_ctx. Đổi "
+                    "llm.local.api_style sang 'ollama' nếu cần đặt num_ctx.",
+                    num_ctx,
+                )
+            url = f"{self.base_url}/v1/chat/completions"
+            body = self._post_json(url, {
+                "model": model_name,
+                "messages": full_messages,
+                "max_tokens": self.max_tokens,
+                "stream": False,
+            })
+            try:
+                return json.loads(body)["choices"][0]["message"]["content"]
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                raise ModelBackendError(
+                    f"Response không đúng định dạng OpenAI-style (url={url}): {body[:300]}"
+                ) from exc
+
+        # --- Ollama native: chở được options.num_ctx và think ---------------
+        url = f"{self.base_url}/api/chat"
+        payload: dict = {
+            "model": model_name,
+            "messages": full_messages,
+            "stream": False,
+            "options": {"num_predict": self.max_tokens},
+        }
+        if num_ctx:
+            payload["options"]["num_ctx"] = int(num_ctx)
+        if think is not None:
+            payload["think"] = bool(think)
+
         try:
-            data = json.loads(body)
-            return data["choices"][0]["message"]["content"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            body = self._post_json(url, payload)
+        except ModelBackendError as exc:
+            # Một số bản Ollama cũ chưa biết tham số "think" và trả HTTP 400.
+            # Thử lại 1 lần KHÔNG có "think" -- phần lọc <think> ở
+            # decision_agent.py vẫn xử lý được kết quả.
+            if think is None or "HTTP 400" not in str(exc):
+                raise
+            logger.warning(
+                "Server không chấp nhận tham số 'think' (HTTP 400) -- thử lại "
+                "không dùng tham số này; vẫn lọc khối <think> ở bước parse."
+            )
+            payload.pop("think", None)
+            body = self._post_json(url, payload)
+
+        try:
+            return json.loads(body)["message"]["content"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise ModelBackendError(
-                f"Response từ server local không đúng định dạng OpenAI-style "
-                f"(url={url}): {body[:300]}"
+                f"Response không đúng định dạng Ollama /api/chat (url={url}): "
+                f"{body[:300]}"
             ) from exc
 
 
@@ -256,6 +349,29 @@ def resolve_model_for_role(cfg: dict[str, Any], role: str) -> str:
     return str(model)
 
 
+def resolve_num_ctx_for_role(cfg: dict[str, Any], role: str) -> int | None:
+    """Cửa sổ ngữ cảnh (num_ctx) cho vai trò `role`, đọc
+    `llm.<backend>.<role>_num_ctx`. Trả None nếu không khai báo (dùng mặc
+    định của model).
+
+    Chỉ có tác dụng với backend local chạy API native của Ollama.
+    """
+    llm_cfg = cfg.get("llm") or {}
+    backend = (llm_cfg.get("backend") or "api").strip().lower()
+    section = llm_cfg.get(backend) or {}
+    value = section.get(f"{role}_num_ctx")
+    if value in (None, "", 0):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "llm.%s.%s_num_ctx=%r không phải số nguyên -- bỏ qua, dùng mặc "
+            "định của model.", backend, role, value,
+        )
+        return None
+
+
 def get_model_backend(cfg: dict[str, Any]) -> ModelBackend:
     """Factory: đọc mục `llm:` trong config.yaml, trả về backend tương ứng.
 
@@ -279,6 +395,7 @@ def get_model_backend(cfg: dict[str, Any]) -> ModelBackend:
         return LocalModelBackend(
             model=default_model,
             base_url=local_cfg.get("base_url", "http://localhost:11434"),
+            api_style=local_cfg.get("api_style", "ollama"),
         )
 
     raise ModelBackendError(f"llm.backend không hỗ trợ: {backend!r} (api | local)")
