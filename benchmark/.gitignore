@@ -40,3 +40,30 @@ results/.stage5_scratch_crate/
 # Code Rust do Stage 4 (LLM) sinh ra -- xem lại rồi mới merge tay vào
 # versions/rust_pure/pyo3_ext/src/lib.rs, không commit thẳng bản nháp.
 versions/rust_pure/pyo3_ext/generated/
+
+# ---------------------------------------------------------------------------
+# Chế độ REPO ĐỘNG + thực nghiệm trên máy thuê
+# ---------------------------------------------------------------------------
+# Thư mục làm việc tạm do pipeline sinh ra (bản copy repo, venv riêng, crate
+# Rust, prompt đã dump, đối số đã pickle). Có thể rất nặng và sinh lại được.
+.rtb_*/
+**/.rtb_venv/
+**/.rtb_crates*/
+**/.rtb_capture/
+**/.rtb_prompts/
+rtb_work*/
+
+# Thư mục kết quả theo từng lượt chạy (results/*.json ở trên chỉ che tầng đầu).
+results/run_*/
+results/*/
+
+# Test/script tạm ngoài git (đã chuyển bản có giá trị vào benchmark/tests/)
+.scratch/
+
+# Dataset tải về trên máy thuê -- rất nặng, và không phải code của team.
+data_repotransbench/
+.dataset_root
+
+# Log + gói kết quả sinh bởi scripts/
+ollama.log
+*.tar.gz

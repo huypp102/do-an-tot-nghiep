@@ -115,7 +115,7 @@ def maturin_develop(
     logger.info("Đang build lại extension: %s (timeout %ds)...", " ".join(cmd), timeout_sec)
     try:
         proc = subprocess.run(
-            cmd, cwd=str(crate_dir), capture_output=True, text=True, timeout=timeout_sec
+            cmd, cwd=str(crate_dir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec
         )
     except subprocess.TimeoutExpired:
         return RebuildResult(BUILD_FAILED, f"`maturin develop` quá {timeout_sec}s -> huỷ.")

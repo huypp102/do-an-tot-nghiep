@@ -34,6 +34,7 @@ BENCHMARK_ROOT = Path(__file__).resolve().parent
 if str(BENCHMARK_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_ROOT))
 
+import outcomes  # noqa: E402
 from config_loader import ensure_utf8_stdio, load_config  # noqa: E402
 from data.loader import load_image  # noqa: E402
 from stage6_benchmark import bench, report  # noqa: E402
@@ -563,11 +564,195 @@ def run_once(cfg: dict, image, results_dir: Path, timestamp: str, label: str = "
     return summary
 
 
+def _dynamic_mode_selected(cfg: dict) -> bool:
+    """Có dùng đường chạy ĐỘNG (PHA A..F, repo_pipeline.py) hay không.
+
+    Đường động cần: `repo_oracle.enabled` VÀ đang nhắm vào repo thật (dataset,
+    hoặc target.mode=file|repo). Chế độ LEGACY `target.mode=function` (4 hàm
+    viraj7, workload 1 ảnh, đo in-process) không bao giờ đi đường này -- đó là
+    ràng buộc "4 hàm viraj7 vẫn chạy được như trước".
+    """
+    ro_cfg = cfg.get("repo_oracle") or {}
+    if not ro_cfg.get("enabled", True):
+        return False
+    ds_cfg = cfg.get("dataset") or {}
+    mode = (cfg.get("target") or {}).get("mode", "function")
+    return bool(ds_cfg.get("enabled", False)) or mode in ("file", "repo")
+
+
+def _main_dynamic(cfg: dict, results_dir: Path, timestamp: str) -> int:
+    """Đường chạy ĐỘNG: oracle là bộ test gốc của repo, workload là đối số thật.
+
+    Exit code KHÁC 0 khi không repo nào đo được gì -- yêu cầu Pha 0. Trước đây
+    pipeline luôn trả 0 kể cả khi bảng kết quả toàn `n/a`.
+    """
+    import env_metadata
+    from repo_pipeline import run_repo_pipeline
+    from stage6_benchmark import report as rp
+
+    ds_cfg = cfg.get("dataset") or {}
+    repos: list[Path] = []
+
+    if ds_cfg.get("enabled", False):
+        _banner("INPUT", "Chế độ DATASET -- oracle là bộ test gốc của từng repo")
+        from input.intake import IntakeError, resolve_dataset_repos
+
+        try:
+            repos = resolve_dataset_repos(
+                ds_cfg.get("source_root", ""), int(ds_cfg.get("max_repos", 0) or 0)
+            )
+        except IntakeError as exc:
+            logger.error("Không dùng được dataset:\n%s", exc)
+            return 1
+    else:
+        _banner("INPUT", "Chế độ TARGET ĐƠN (repo động)")
+        from input.intake import IntakeError, resolve_target
+
+        source = (cfg.get("target") or {}).get("source")
+        try:
+            repos = [resolve_target(source)]
+        except IntakeError as exc:
+            logger.error("Không resolve được target.source=%r:\n%s", source, exc)
+            return 1
+
+    rows: list[dict] = []
+    for idx, repo in enumerate(repos, start=1):
+        _banner("REPO", f"{idx}/{len(repos)}: {repo.name}")
+        try:
+            row = run_repo_pipeline(
+                cfg=cfg, repo_path=repo, results_dir=results_dir,
+                timestamp=timestamp, label=repo.name, benchmark_root=BENCHMARK_ROOT,
+            )
+        except Exception as exc:  # noqa: BLE001 -- 1 repo hỏng không dừng cả dataset
+            logger.exception("Repo '%s' lỗi bất ngờ -- ghi nhận rồi chạy tiếp.", repo.name)
+            row = {
+                "label": repo.name, "ok": False,
+                "repo_status": outcomes.NO_MEASURABLE_HOTSPOT,
+                "status_note": f"lỗi bất ngờ: {type(exc).__name__}: {exc}",
+                "metrics": {}, "hotspots": [],
+            }
+        rows.append(row)
+
+        # In ngay từng repo: chạy cả dataset rất lâu, không nên phải đợi hết
+        # mới thấy repo đầu ra sao.
+        print("\n" + rp.build_hotspot_reason_table(row.get("hotspots") or []))
+        print("\n" + rp.build_round_detail_table(row.get("hotspots") or []))
+
+    # ------------------------------------------------------------------
+    import funnel as funnel_mod
+
+    repo_table = rp.build_repo_table(rows)
+    dataset_table = rp.build_dataset_metrics_table(rows)
+    meta = env_metadata.collect(cfg, BENCHMARK_ROOT)
+
+    # PHẦN 1.2 -- phễu tổng hợp. Dựng lại `RepoFunnel` từ dict đã ghi để hàm
+    # tổng hợp chỉ có MỘT nguồn sự thật (file kết quả), không phụ thuộc object
+    # còn sống trong bộ nhớ.
+    funnels = []
+    for r in rows:
+        fdict = r.get("funnel") or {}
+        rf = funnel_mod.RepoFunnel(label=r.get("label", "?"))
+        rf.baseline_pass = bool((fdict.get("counts") or {}).get("baseline_pass"))
+        rf.hotspots = fdict.get("hotspots") or {}
+        rf.drop_reasons = fdict.get("drop_reasons") or {}
+        rf.vacuous = set(fdict.get("vacuous") or [])
+        rf.confounded = set(fdict.get("confounded") or [])
+        funnels.append(rf)
+    agg = funnel_mod.aggregate(funnels)
+    funnel_table = funnel_mod.format_funnel_table(agg, funnels)
+
+    print("\n" + funnel_table)
+    print("\n" + repo_table)
+    print("\n" + dataset_table)
+    print("\n" + env_metadata.format_for_report(meta))
+
+    report_path = results_dir / f"report_{timestamp}_repos.md"
+    report_path.write_text(
+        "\n\n".join([
+            env_metadata.format_for_report(meta), funnel_table, repo_table,
+            dataset_table,
+            *[rp.build_hotspot_reason_table(r.get("hotspots") or []) for r in rows],
+            *[rp.build_round_detail_table(r.get("hotspots") or []) for r in rows],
+        ]),
+        encoding="utf-8",
+    )
+    (results_dir / f"funnel_{timestamp}.json").write_text(
+        json.dumps({"aggregate": agg, "per_repo": [f.as_dict() for f in funnels]},
+                   indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    ds_path = results_dir / f"dataset_summary_{timestamp}.json"
+    ds_path.write_text(
+        json.dumps({
+            "timestamp": timestamp,
+            "environment": meta,
+            "n_repos": len(rows),
+            "n_ok": sum(1 for r in rows if r.get("ok")),
+            "repos": [
+                {"label": r.get("label"), "ok": r.get("ok"),
+                 "repo_status": r.get("repo_status"),
+                 "status_note": r.get("status_note"),
+                 "metrics": r.get("metrics"),
+                 "summary_path": r.get("summary_path")}
+                for r in rows
+            ],
+        }, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+
+    # ---------------------------------------------- PHẦN 2.6: báo cáo ablation
+    import ablation as ab
+
+    if ab.is_enabled(cfg):
+        # Gộp kết quả TỪNG NHÁNH qua tất cả repo. Khoá hotspot mang tên repo ở
+        # đầu để hai repo có hàm cùng tên không đè lên nhau.
+        per_arm: dict[str, dict] = {a: {} for a in ab.arms(cfg)}
+        for r in rows:
+            for arm, table in (r.get("ablation_arm_results") or {}).items():
+                for name, raw in (table or {}).items():
+                    per_arm.setdefault(arm, {})[f"{r.get('label')}::{name}"] = ab.ArmResult(
+                        arm=arm,
+                        flags=raw.get("flags") or {},
+                        reason=raw.get("reason", ""),
+                        prompt_tokens=raw.get("prompt_tokens"),
+                        truncated=bool(raw.get("truncated")),
+                        fix_rounds=int(raw.get("fix_rounds") or 0),
+                        llm_seconds=raw.get("llm_seconds"),
+                        vacuous=bool(raw.get("vacuous")),
+                        speedup=raw.get("speedup") or {},
+                    )
+        paired = ab.build_pairs(
+            per_arm,
+            min_discordant=int((cfg.get("ablation") or {}).get("min_discordant_pairs", 10)),
+        )
+        ab_md, ab_js, ab_text = ab.write_reports(paired, results_dir, timestamp, cfg)
+        print("\n" + ab_text)
+        print(f"\nĐã lưu báo cáo ablation: {ab_md.name}, {ab_js.name}")
+
+    n_ok = sum(1 for r in rows if r.get("ok"))
+    total_measured = sum((r.get("metrics") or {}).get("n_measured", 0) for r in rows)
+    print(f"\nĐã lưu: {report_path.name}, {ds_path.name} trong {results_dir}")
+    print(f"Repo có số liệu dùng được: {n_ok}/{len(rows)} | tổng hotspot MEASURED: {total_measured}")
+
+    if total_measured == 0:
+        # Đây chính là trường hợp trước Pha 0 vẫn trả exit code 0.
+        logger.error(
+            "KHÔNG hotspot nào đo được trên toàn bộ %d repo -- lý do của từng "
+            "hotspot đã ghi trong repo_summary_*.json. Thoát với exit code 2.",
+            len(rows),
+        )
+        return 2
+    return 0
+
+
 def main() -> int:
     cfg = load_config()  # đã mở rộng ${VAR:-default} -- xem config_loader.py
     results_dir = BENCHMARK_ROOT / (cfg.get("paths") or {}).get("results_dir", "results")
     results_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    if _dynamic_mode_selected(cfg):
+        return _main_dynamic(cfg, results_dir, timestamp)
 
     _banner("INPUT", "Nạp ảnh workload")
     image = load_image(cfg)

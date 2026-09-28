@@ -89,6 +89,198 @@ def build_prompt(function_name: str, hotspot_source: str, context_text: str) -> 
     )
 
 
+# ---------------------------------------------------------------------------
+# PHA D -- prompt cho CHỮ KÝ BẤT KỲ (chế độ repo động).
+#
+# `PROMPT_TEMPLATE` ở trên ràng buộc cứng chữ ký vào use-case ảnh
+# (`Vec<u8>` + width/height). Đúng cho 4 hàm viraj7 ở chế độ legacy, nhưng SAI
+# cho repo RepoTransBench: ở đó hàm nhận list số, chuỗi, dict, hay đối tượng
+# tự định nghĩa. Nên chế độ động dùng template riêng, và chữ ký được suy từ
+# KIỂU QUAN SÁT ĐƯỢC trên đối số thật (Pha B) chứ không từ type-hint.
+#
+# Việc PHÂN TẦNG do CODE quyết định (deep_compare.classify_tier), không hỏi
+# LLM: nếu để LLM tự chọn cách nhận đối số thì mỗi lần sinh ra một quy ước
+# khác nhau, và shim Python không khớp được.
+# ---------------------------------------------------------------------------
+TIER1_PROMPT_TEMPLATE = """**Nhiệm vụ**: dịch hàm Python `{function_name}` sang Rust (PyO3) \
+để tăng tốc, giữ NGUYÊN hành vi của bản Python.
+
+**Chữ ký thật, đo được từ đối số mà bộ test của repo truyền vào** (đây là \
+sự thật, KHÔNG phải type-hint -- hãy tin số liệu này hơn mọi annotation trong code):
+{observed_types}
+{io_examples}{graph_section}
+**Code hotspot cần dịch**:
+```python
+{hotspot_source}
+```
+
+**Ràng buộc bắt buộc**:
+1. Viết MỘT hàm `#[pyfunction]` tên ĐÚNG là `{function_name}`, và MỘT \
+`#[pymodule]` tên ĐÚNG là `{ext_module}` có đăng ký hàm đó.
+2. Chữ ký Rust phải nhận ĐÚNG số đối số và ĐÚNG kiểu như bảng trên, theo ánh \
+xạ: int -> i64, float -> f64, bool -> bool, str -> String, bytes -> Vec<u8>, \
+list[float] -> Vec<f64>, list[int] -> Vec<i64>, dict[str -> int] -> \
+std::collections::HashMap<String, i64>.
+3. Trả về `PyResult<T>` với T là kiểu tương ứng giá trị trả về của bản Python. \
+Hàm Python trả `None` thì Rust trả `PyResult<()>`.
+4. Nếu bản Python SỬA ĐỐI SỐ TẠI CHỖ (mutate list truyền vào), nhận \
+`&Bound<'_, PyList>` và sửa trực tiếp trên đó -- đừng nhận `Vec<T>` vì `Vec` \
+là bản copy, sửa nó thì bên Python không thấy gì.
+5. Chỉ dùng `std` của Rust và crate `pyo3`, không thêm crate ngoài.
+
+**Định dạng trả lời BẮT BUỘC (đúng 2 mục, đúng thứ tự)**:
+## Rust code
+```rust
+<toàn bộ code Rust, gồm cả #[pymodule]>
+```
+
+## Optimization strategy
+<giải thích ngắn: đã tối ưu gì so với bản Python, vì sao>
+"""
+
+TIER2_PROMPT_TEMPLATE = """**Nhiệm vụ**: tăng tốc hàm Python `{function_name}` bằng cách \
+TÁCH KERNEL sang Rust (PyO3).
+
+Hàm này nhận ĐỐI TƯỢNG tuỳ ý, nên KHÔNG dịch nguyên chữ ký sang Rust được. \
+Cách làm: Rust chỉ nhận các TRƯỜNG kiểu gốc của đối tượng, còn một shim Python \
+mỏng lo việc tháo đối tượng ra và đóng gói kết quả lại.
+
+**Chữ ký thật, đo được từ đối số mà bộ test của repo truyền vào**:
+{observed_types}
+{io_examples}{graph_section}
+**Code hotspot cần dịch**:
+```python
+{hotspot_source}
+```
+
+**Ràng buộc bắt buộc**:
+1. Viết kernel Rust `#[pyfunction]` tên `{function_name}_kernel`, chỉ nhận/trả \
+KIỂU GỐC (số, chuỗi, Vec của số). Kèm `#[pymodule]` tên ĐÚNG là `{ext_module}`.
+2. Viết shim Python tên ĐÚNG là `{function_name}`: tháo các thuộc tính cần \
+thiết ra khỏi đối tượng, gọi kernel Rust, rồi dựng lại giá trị trả về ĐÚNG như \
+bản Python gốc (cùng lớp, cùng thuộc tính).
+3. Shim phải nhận ĐÚNG chữ ký của hàm Python gốc, để thay thế được trong suốt.
+4. Chỉ dùng `std` + `pyo3` ở phía Rust; phía shim chỉ dùng stdlib Python.
+
+**Định dạng trả lời BẮT BUỘC (đúng 3 mục, đúng thứ tự)**:
+## Rust code
+```rust
+<kernel Rust, gồm cả #[pymodule]>
+```
+
+## Python shim
+```python
+<hàm shim Python>
+```
+
+## Optimization strategy
+<giải thích ngắn: phần nào chuyển sang Rust, phần nào giữ ở Python, vì sao>
+"""
+
+
+def format_observed_types(
+    arg_types: list[str], kwarg_types: dict[str, str], return_type: str = ""
+) -> str:
+    """Bảng kiểu quan sát được, dạng LLM đọc được.
+
+    Đây là mảnh context QUAN TRỌNG NHẤT của Pha D: không có nó thì LLM phải
+    đoán chữ ký, và chữ ký sai thì code Rust không bao giờ gọi được từ Python.
+    """
+    lines: list[str] = []
+    for i, t in enumerate(arg_types or []):
+        lines.append(f"  - đối số vị trí #{i}: {t}")
+    for k, t in (kwarg_types or {}).items():
+        lines.append(f"  - đối số từ khoá `{k}`: {t}")
+    if return_type:
+        lines.append(f"  - GIÁ TRỊ TRẢ VỀ: {return_type}")
+    if not lines:
+        return "  (không ghi được kiểu nào -- hàm có thể không nhận đối số)"
+    return "\n".join(lines)
+
+
+def format_io_examples(examples: list[dict], max_examples: int = 3) -> str:
+    """Khối ví dụ VÀO/RA lấy từ lời gọi thật mà bộ test của repo tạo ra.
+
+    CÓ Ở CẢ HAI NHÁNH ABLATION. Đây KHÔNG phải context graph: nó là phần đặc
+    tả hành vi tối thiểu để viết được chữ ký PyO3 và biết hàm trả về cái gì.
+    Bỏ nó đi thì nhánh `none` không còn là "cùng bài toán, thiếu context lân
+    cận" mà thành "bài toán khác, thiếu cả đặc tả" -- phép so sánh sẽ vô nghĩa.
+    """
+    if not examples:
+        return ""
+    lines = ["", "**Ví dụ vào/ra THẬT (ghi lại từ bộ test của repo)**:"]
+    for i, ex in enumerate(examples[:max_examples]):
+        args = ex.get("args_repr") or []
+        kwargs = ex.get("kwargs_repr") or {}
+        call = ", ".join(list(args) + [f"{k}={v}" for k, v in kwargs.items()])
+        lines.append(f"  {i + 1}. `{ex.get('function', '?')}({call})`")
+        if ex.get("exception"):
+            lines.append(f"     -> NÉM LỖI: {ex['exception']}")
+        else:
+            lines.append(f"     -> trả về: {ex.get('result_repr', '?')}")
+        if ex.get("args_after_repr") and ex["args_after_repr"] != args:
+            lines.append(
+                f"     -> đối số SAU lời gọi: {ex['args_after_repr']} "
+                "(hàm SỬA ĐỐI SỐ TẠI CHỖ -- bản Rust phải sửa được y như vậy)"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_graph_section(context_text: str) -> str:
+    """Khối context lân cận PCG/PSG -- ĐÂY là thứ duy nhất khác nhau giữa 2
+    nhánh ablation (`graph` có, `none` không)."""
+    return (
+        "\n**Context lân cận của hotspot (từ Program Call Graph + Program "
+        f"Structure Graph)**:\n{context_text}\n"
+    )
+
+
+def build_signature_prompt(
+    function_name: str,
+    hotspot_source: str,
+    context_text: str,
+    tier: str,
+    observed_types: str,
+    ext_module: str,
+    io_examples: list[dict] | None = None,
+    include_graph_context: bool = True,
+) -> str:
+    """Prompt cho chế độ động. MỘT hàm build duy nhất cho CẢ HAI nhánh ablation.
+
+    `include_graph_context` là **cờ duy nhất** phân biệt hai nhánh:
+        True  (nhánh "graph") -- có khối context lân cận PCG/PSG.
+        False (nhánh "none")  -- BỎ HẲN khối đó, giữ nguyên mọi thứ còn lại.
+
+    Cố ý dùng chung một hàm thay vì hai hàm/hai template: nếu tách ra thì chỉ
+    cần một lần sửa lệch là hai nhánh khác nhau ở nhiều hơn một biến, và toàn
+    bộ kết luận ablation mất giá trị.
+    """
+    from stage1_profiling.deep_compare import TIER_KERNEL
+
+    template = TIER2_PROMPT_TEMPLATE if tier == TIER_KERNEL else TIER1_PROMPT_TEMPLATE
+    return template.format(
+        function_name=function_name,
+        graph_section=(
+            format_graph_section(context_text or "(không có context láng giềng)")
+            if include_graph_context else ""
+        ),
+        io_examples=format_io_examples(io_examples or []),
+        hotspot_source=hotspot_source or "(không lấy được source)",
+        observed_types=observed_types,
+        ext_module=ext_module,
+    )
+
+
+def parse_python_shim(text: str) -> str:
+    """Lấy khối `## Python shim` (chỉ Tầng 2 có). Rỗng nếu không có."""
+    match = re.search(
+        r"##\s*Python shim\s*\n+```(?:python)?\s*\n(.*?)```",
+        text, flags=re.DOTALL | re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else ""
+
+
 def parse_response(text: str) -> dict[str, str]:
     """Tách code Rust + chiến lược tối ưu ra khỏi câu trả lời của model.
 
@@ -206,6 +398,8 @@ class GeneratorAgent:
         output_dir: Path | None = None,
         model: str | None = None,
         num_ctx: int | None = None,
+        prompt_dir: Path | None = None,
+        arm: str = "",
     ) -> None:
         from stage4_llm_transpile.agent_session import AgentSession
 
@@ -216,6 +410,11 @@ class GeneratorAgent:
         # code lẫn context từ Stage 3.
         self.model = model
         self.num_ctx = num_ctx
+        # PHẦN 2.2: nơi lưu prompt đầy đủ để diff hai nhánh. `arm` chỉ dùng cho
+        # tên file -- nó KHÔNG được đi vào nội dung prompt, nếu không hai nhánh
+        # sẽ khác nhau ở nhiều hơn một biến.
+        self.prompt_dir = Path(prompt_dir) if prompt_dir else None
+        self.arm = arm or ""
         self.session = AgentSession(
             role_name="generator",
             system_prompt=GENERATOR_SYSTEM_PROMPT,
@@ -224,16 +423,78 @@ class GeneratorAgent:
             num_ctx=num_ctx,
         )
 
-    def _send_and_parse(self, function_name: str, prompt: str) -> dict[str, Any]:
+    def _dump_prompt(self, function_name: str, prompt: str, label: str) -> Path | None:
+        """Ghi prompt ĐẦY ĐỦ ra file. Trả None nếu chưa cấu hình `prompt_dir`.
+
+        Tên file mang cả `arm` để `diff` hai nhánh là một lệnh:
+            diff prompts/graph/<fn>.generate.txt prompts/none/<fn>.generate.txt
+        """
+        if self.prompt_dir is None:
+            return None
+        try:
+            self.prompt_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", function_name) or "unnamed"
+            suffix = f".{self.arm}" if self.arm else ""
+            path = self.prompt_dir / f"{safe}{suffix}.{label}.txt"
+            path.write_text(prompt, encoding="utf-8")
+            return path
+        except OSError as exc:
+            logger.warning("Không ghi được prompt ra %s: %s", self.prompt_dir, exc)
+            return None
+
+    def _send_and_parse(
+        self,
+        function_name: str,
+        prompt: str,
+        temperature: float | None = None,
+        seed: int | None = None,
+        prompt_label: str = "generate",
+    ) -> dict[str, Any]:
         """Gửi 1 lượt, parse code Rust, ghi file. Gom lỗi thành dict thay vì
-        raise để caller (run_pipeline/loop_runner) chạy tiếp hotspot khác."""
+        raise để caller (run_pipeline/loop_runner) chạy tiếp hotspot khác.
+
+        Luôn LƯU PROMPT ĐẦY ĐỦ ra file trước khi gọi (PHẦN 2.2): hai nhánh
+        ablation phải diff được với nhau, và nếu chỉ log độ dài thì không ai
+        kiểm tra lại được rằng chúng chỉ khác đúng một khối.
+        """
+        import time as _time
+
         from stage4_llm_transpile.model_backend import ModelBackendError
 
+        prompt_path = self._dump_prompt(function_name, prompt, prompt_label)
+
+        t0 = _time.perf_counter()
         try:
-            response = self.session.send(prompt)
+            response = self.session.send(prompt, temperature=temperature, seed=seed)
         except ModelBackendError as exc:
             logger.error("Generator Agent: gọi LLM thất bại cho '%s': %s", function_name, exc)
-            return {"ok": False, "function_name": function_name, "error": str(exc)}
+            return {
+                "ok": False, "function_name": function_name, "error": str(exc),
+                "prompt_path": str(prompt_path) if prompt_path else None,
+                "llm_seconds": _time.perf_counter() - t0,
+            }
+        llm_seconds = _time.perf_counter() - t0
+        # Ước lượng tại chỗ khi backend không báo số token (backend tuỳ biến
+        # của người dùng, hoặc mock trong test). Báo cáo độ dài prompt là yêu
+        # cầu của ablation (PHẦN 2.5/2.6) nên không được phụ thuộc vào việc
+        # backend có tự tính hay không.
+        est_tokens = (
+            self.session.last_prompt_tokens
+            if self.session.last_prompt_tokens is not None
+            else int(len(prompt) / 3.5)
+        )
+        # Phán định BỊ CẮT ở đây, không chỉ dựa vào backend: Ollama cắt prompt
+        # âm thầm, và một backend tuỳ biến có thể không báo gì cả. So ước lượng
+        # token với `num_ctx` của chính vai trò này là phép kiểm độc lập
+        # backend, và nó là căn cứ để gắn CONFOUNDED (PHẦN 2.5).
+        truncated = bool(self.session.last_truncated)
+        if self.num_ctx and est_tokens > int(self.num_ctx):
+            truncated = True
+            logger.warning(
+                "Prompt cho '%s' ước tính %d token > num_ctx=%s -> coi là BỊ CẮT. "
+                "Hotspot này sẽ bị gắn CONFOUNDED và tách khỏi so sánh ablation.",
+                function_name, est_tokens, self.num_ctx,
+            )
 
         parsed = parse_response(response)
         if not parsed["rust_code"]:
@@ -241,22 +502,57 @@ class GeneratorAgent:
                 "Generator Agent: response cho '%s' không chứa code Rust nào.", function_name,
             )
             return {"ok": False, "function_name": function_name,
-                    "error": "response không chứa code Rust", "raw_response": response}
+                    "error": "response không chứa code Rust", "raw_response": response,
+                    "prompt_path": str(prompt_path) if prompt_path else None,
+                    "prompt_tokens": est_tokens,
+                    "truncated": truncated,
+                    "llm_seconds": llm_seconds}
 
         out_path = write_generated_rust(
             function_name, parsed["rust_code"], parsed["strategy"], self.output_dir
         )
-        return {
+        result = {
             "ok": True,
             "function_name": function_name,
             "output_path": str(out_path),
             "rust_code": parsed["rust_code"],
             "strategy": parsed["strategy"],
             "rust_code_chars": len(parsed["rust_code"]),
+            # --- số liệu cho báo cáo ablation (PHẦN 2.5/2.6) ---
+            "prompt_path": str(prompt_path) if prompt_path else None,
+            "prompt_chars": len(prompt),
+            "prompt_tokens": est_tokens,
+            "truncated": truncated,
+            "llm_seconds": llm_seconds,
+            "seed": seed,
+            "temperature": temperature,
         }
+        # Tầng 2 (Pha D) còn cần shim Python đi kèm kernel Rust. Lượt sửa lỗi
+        # biên dịch cũng phải giữ lại shim, nên parse ở đây chứ không chỉ ở
+        # lượt sinh đầu tiên.
+        shim = parse_python_shim(parsed.get("raw_response") or "")
+        if shim:
+            result["python_shim"] = shim
+        return result
 
-    def generate_rust(self, function_name: str, context: dict[str, Any]) -> dict[str, Any]:
-        """Lượt ĐẦU: dịch hotspot sang Rust dựa trên context từ Stage 3."""
+    def generate_rust(
+        self,
+        function_name: str,
+        context: dict[str, Any],
+        signature: dict[str, Any] | None = None,
+        include_graph_context: bool = True,
+        temperature: float | None = None,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        """Lượt ĐẦU: dịch hotspot sang Rust dựa trên context từ Stage 3.
+
+        `signature` (Pha D, chỉ có ở chế độ repo động) gồm:
+            tier               -- TIER1_NATIVE | TIER2_KERNEL (do code quyết)
+            observed_arg_types, observed_kwarg_types, observed_return_type
+            ext_module         -- tên `#[pymodule]` mà code Rust phải dùng
+        Không truyền `signature` -> dùng prompt LEGACY (chữ ký ảnh Vec<u8> +
+        width/height), giữ nguyên hành vi cũ cho 4 hàm viraj7.
+        """
         from stage3_context_packaging.packager import format_context_for_prompt
 
         if not context.get("found"):
@@ -265,16 +561,45 @@ class GeneratorAgent:
 
         occurrences = context.get("occurrences") or []
         hotspot_source = occurrences[0]["hotspot"]["source"] if occurrences else ""
-        prompt = build_prompt(function_name, hotspot_source, format_context_for_prompt(context))
+        context_text = format_context_for_prompt(context)
 
-        logger.info(
-            "Generator Agent: dịch hotspot '%s' qua backend %s (prompt %d ký tự)...",
-            function_name, getattr(self.backend, "name", "?"), len(prompt),
+        if signature:
+            prompt = build_signature_prompt(
+                function_name=function_name,
+                hotspot_source=hotspot_source,
+                context_text=context_text,
+                tier=signature.get("tier", ""),
+                observed_types=format_observed_types(
+                    signature.get("observed_arg_types") or [],
+                    signature.get("observed_kwarg_types") or {},
+                    signature.get("observed_return_type", ""),
+                ),
+                ext_module=signature.get("ext_module") or f"{function_name}_ext",
+                io_examples=signature.get("io_examples") or [],
+                include_graph_context=include_graph_context,
+            )
+            logger.info(
+                "Generator Agent: dịch '%s' theo chữ ký THẬT (tier=%s, %d đối số, "
+                "arm=%s, context_graph=%s, seed=%s) qua backend %s (prompt %d ký tự)...",
+                function_name, signature.get("tier", "?"),
+                len(signature.get("observed_arg_types") or []),
+                self.arm or "(không ablation)", include_graph_context, seed,
+                getattr(self.backend, "name", "?"), len(prompt),
+            )
+        else:
+            prompt = build_prompt(function_name, hotspot_source, context_text)
+            logger.info(
+                "Generator Agent: dịch hotspot '%s' qua backend %s (prompt %d ký tự)...",
+                function_name, getattr(self.backend, "name", "?"), len(prompt),
+            )
+        return self._send_and_parse(
+            function_name, prompt, temperature=temperature, seed=seed,
+            prompt_label="generate",
         )
-        return self._send_and_parse(function_name, prompt)
 
     def optimize_further(
-        self, function_name: str, strategy: str | None, round_index: int
+        self, function_name: str, strategy: str | None, round_index: int,
+        temperature: float | None = None, seed: int | None = None,
     ) -> dict[str, Any]:
         """Lượt TỐI ƯU THÊM cho vòng lặp Stage 6 (optimization_loop).
 
@@ -292,10 +617,14 @@ class GeneratorAgent:
             "Generator Agent: tối ưu thêm '%s' (vòng %d), chiến lược: %s",
             function_name, round_index, (strategy or "(tự chọn)")[:80],
         )
-        return self._send_and_parse(function_name, prompt)
+        return self._send_and_parse(
+            function_name, prompt, temperature=temperature, seed=seed,
+            prompt_label=f"optimize_r{round_index}",
+        )
 
     def fix_compile_error(
-        self, function_name: str, compiler_output: str, error_class: str = "OTHER"
+        self, function_name: str, compiler_output: str, error_class: str = "OTHER",
+        temperature: float | None = None, seed: int | None = None,
     ) -> dict[str, Any]:
         """Lượt SỬA LỖI cho Stage 5 (compiler-in-the-loop).
 
@@ -312,7 +641,11 @@ class GeneratorAgent:
             "Generator Agent: yêu cầu sửa lỗi biên dịch '%s' cho '%s'...",
             error_class, function_name,
         )
-        return self._send_and_parse(function_name, prompt)
+        self._n_fix_calls = getattr(self, "_n_fix_calls", 0) + 1
+        return self._send_and_parse(
+            function_name, prompt, temperature=temperature, seed=seed,
+            prompt_label=f"fix{self._n_fix_calls}",
+        )
 
 
 def generate_rust_for(

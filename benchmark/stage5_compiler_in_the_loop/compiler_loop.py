@@ -168,7 +168,7 @@ def compile_and_classify(
     logger.info("Stage 5: chạy `cargo check` tại %s ...", crate_dir)
     try:
         proc = subprocess.run(
-            cmd, cwd=str(crate_dir), capture_output=True, text=True, timeout=timeout_sec
+            cmd, cwd=str(crate_dir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec
         )
     except subprocess.TimeoutExpired:
         return CompileResult(

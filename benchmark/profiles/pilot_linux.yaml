@@ -1,0 +1,61 @@
+# Profile cho THỰC NGHIỆM 1 trên máy Linux thuê (10-12 repo RepoTransBench).
+#
+# Dùng bằng một trong hai cách:
+#     RUN_PROFILE=pilot_linux python run_experiment1.py
+#     python run_experiment1.py --profile pilot_linux
+#
+# File này GỘP ĐÈ lên config.yaml (chỉ những khoá có ở đây bị ghi đè, phần còn
+# lại giữ nguyên mặc định trung tính). Mọi giá trị PHỤ THUỘC MÁY đều đọc từ
+# biến môi trường, không hard-code đường dẫn nào:
+#     REPOTRANSBENCH_ROOT   thư mục source_projects/Python của dataset
+#     OLLAMA_BASE_URL       endpoint Ollama (thường http://127.0.0.1:11434)
+#     RTB_WORK_DIR          thư mục làm việc (nên trỏ vào ổ còn nhiều chỗ)
+
+llm:
+  enabled: true
+  backend: local
+  num_agents: 2
+  local:
+    # num_ctx HẸP HƠN mặc định (32768/16384) có chủ ý: máy thuê chạy 2 model
+    # cùng lúc, KV cache tăng gần tuyến tính theo num_ctx nên nới rộng dễ làm
+    # tràn VRAM. Prompt nào vượt sẽ được gắn TRUNCATED + CONFOUNDED, xem
+    # ablation_report -- cứ để số liệu nói rồi mới nới, đừng nới phòng hờ.
+    generator_num_ctx: 16384
+    decision_num_ctx: 8192
+
+dataset:
+  enabled: true
+  max_repos: 12
+
+graph:
+  # PCG ĐỘNG theo POLO (Eq.1-2): xếp hạng hotspot bằng thời gian chạy thật thay
+  # vì chỉ cấu trúc liên kết tĩnh.
+  build_mode: dynamic
+  candidate_pool: 30
+  top_k_translate: 5
+
+ablation:
+  enabled: true
+  arms: [graph, none]
+  repeats: 1
+  seed: 1234
+  temperature: 0.2
+
+repo_oracle:
+  enabled: true
+  keep_venv: false          # BẮT BUỘC false khi chạy nhiều repo, tránh đầy đĩa
+  cleanup_work_dir: false   # giữ lại để còn xem crate + shim đã sinh
+  test_timeout_sec: 600
+  repo_time_budget_sec: 1800
+  signature_support: extended
+
+experiment:
+  # Tổng thời gian tối đa cho cả lượt chạy. Chạm mốc thì tự dừng và GHI kết quả
+  # dở dang chứ không mất trắng -- giờ GPU tính tiền theo giờ.
+  max_wall_hours: 6
+  # Số repo ứng viên đem đi sàng (chỉ Pha A-B, không LLM/Rust) trước khi chọn.
+  screening_limit: 40
+  # Quy tắc chọn repo, CỐ ĐỊNH trước khi xem kết quả (xem run_experiment1.py).
+  min_replayable_hotspots: 2
+  n_repos: 12
+  n_backup_repos: 3

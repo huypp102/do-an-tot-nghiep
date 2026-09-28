@@ -1,6 +1,7 @@
 # AUDIT — Output của pipeline có đủ để so sánh CORRECTNESS và EFFICIENCY chưa?
 
-**Phạm vi:** chỉ đọc code + chạy thử với mock/dataset giả. **Không sửa file mã nguồn nào.**
+**Phạm vi audit gốc:** chỉ đọc code + chạy thử với mock/dataset giả, không sửa file nào.
+**Cập nhật 2026-09-28 (2 vòng):** vòng 1 thi hành Pha 0→G sửa các lỗ hổng; vòng 2 chuẩn bị Thực nghiệm 1 (chọn hotspot, phễu, VACUOUS, ablation, profile/preflight/scripts) -- xem mục *CHUẨN BỊ THỰC NGHIỆM 1* ngay dưới. Chi tiết vòng 1 — xem mục *TRẠNG THÁI SAU KHI THI HÀNH PHA 0 → G* ngay dưới phần mở đầu.
 **Ngày audit:** 2026-09-28
 **Cặp đánh giá:** Python → Rust, dataset RepoTransBench, 3 phiên bản `python_pure` / `rust_pure` / `hybrid_pyo3`.
 **Máy audit:** Windows dev, KHÔNG có cargo/maturin/GPU/LLM thật (xem mục (d)).
@@ -18,7 +19,164 @@ File kết quả đã mở và đối chiếu: `results/pipeline_raw_*_repo_alph
 
 ---
 
-## (a) Bảng checklist
+---
+
+# CHUẨN BỊ THỰC NGHIỆM 1 (Phần 1→4) — 2026-09-28
+
+Vòng này không sửa lỗ hổng mới mà **chuẩn bị chạy thật**: chọn hotspot cho đủ để có gì mà so, dựng phễu có mẫu số, chống "đúng một cách rỗng", thêm ablation đối chứng, và chuẩn hoá setup để máy thuê không phải sửa code.
+
+## Kết quả kiểm chứng
+
+**19/19 test PASS** (`python tests/run_all.py`, 78s). Toàn bộ test đã được dồn từ `.scratch/` vào `benchmark/tests/` và bỏ đường dẫn Windows hard-code.
+
+| Kiểm chứng | Kết quả |
+|---|---|
+| Phễu có mẫu số từng bước | 23 hotspot → 7 phát lại được (30%) → 5 accepted (22%) |
+| Hai prompt ablation chỉ khác khối context | 4/4 cặp: **chỉ thêm**, không xoá dòng nào |
+| Hai nhánh cách ly | crate riêng `.rtb_crates_graph` / `_none`, gỡ cài có **xác minh** `still_importable` rỗng |
+| VACUOUS | `tally` `rust_call_count=0` → vacuous, loại khỏi regression-free; `always_used` gọi 2× → không vacuous |
+| CONFOUNDED | `num_ctx=550`: graph bị cắt 5×, none 1× → cả 5 bị loại khỏi so sánh |
+| seed tất định | cùng (hotspot, arm, repeat) luôn ra cùng seed; hai nhánh khác seed; temperature `0.2` đồng nhất |
+| `--resume` | lượt 2 gọi LLM **0 lần**; xoá `repos/*.json` mà giữ `arm_cache/` vẫn 0 lần |
+| `max_wall_hours=0` | dừng ngay, exit **3**, vẫn ghi `report.md` |
+| `--dry-run` | in kế hoạch, không chạy repo nào, có ghi quy tắc chọn mẫu |
+| preflight thiếu cargo/Ollama | dừng, exit 1, mỗi mục kèm lệnh sửa |
+| preflight trỏ nhầm `target_projects` | **chặn** — phát hiện 167 repo ở đó, đúng thứ phải chặn |
+| Chế độ legacy | vẫn đo đúng 4 hàm viraj7, không lạc sang đường động |
+| Tính di động | quét 51 file: không còn ổ đĩa / `/tmp` / `Scripts-python` viết cứng |
+
+**Đo trên prompt thật:** nhánh `graph` dài hơn `none` (620 vs 486 token trung bình) — đúng chiều dự kiến, và đó chính là lý do phải có nhãn CONFOUNDED.
+
+## Những gì thay đổi
+
+**Chọn hotspot (1.1).** `graph.candidate_pool=30` + `graph.top_k_translate=5`. Công thức FuncRank **không đổi**, không có điểm cộng thủ công nào — chỉ mở rộng phạm vi xét rồi lọc bằng tiêu chí khách quan (phát lại được + thuộc Tầng 1/2), giữ 5 hotspot đầu **theo đúng thứ tự FuncRank**. Lý do loại từng hotspot được log và ghi vào `stages.hotspot_selection.dropped` kèm vị trí FuncRank.
+
+Lý do phải làm vậy: đo thật trên `piskvorky_sqlitedict` cho thấy **5/5 hotspot hạng cao bị loại**. Lấy thẳng top-5 thì thường còn 0 hotspot, và ablation không có gì để so.
+
+**Phễu (1.2).** [funnel.py](funnel.py) — 10 bước, mỗi bước là tập con của bước trước, có `ratio_vs_prev` và `ratio_vs_first`. Mỗi đơn vị có mốc riêng: bước đơn vị *hotspot* so với `hotspot_found`, không so với số repo (chia ra sẽ là 460% vô nghĩa).
+
+**Chống "đúng một cách rỗng" (1.3).** Plugin hoán đổi đếm `rust_call_count`. Bằng 0 → **VACUOUS**, loại khỏi `regression_free_rate` (mẫu số `n_regression_free_judged` ghi kèm). `repo_zeta` là fixture dựng cố ý cho trường hợp này.
+
+**Ablation (Phần 2).** Hai nhánh sinh từ **một** hàm `build_signature_prompt`, khác nhau bởi cờ `include_graph_context`. Cả hai đều có source hotspot, chữ ký, kiểu đối số quan sát được và **ví dụ vào/ra thật** — mấy thứ đó là đặc tả tối thiểu để viết chữ ký PyO3, bỏ đi thì hai nhánh thành hai bài toán khác nhau. Prompt đầy đủ được dump ra `.rtb_prompts/` để `diff`. So sánh **theo cặp** (bảng 2×2), và **không kết luận thống kê** khi số cặp bất đồng < 10.
+
+**Chuẩn hoá setup (Phần 3).** `config.yaml` chỉ còn mặc định trung tính; `profiles/pilot_linux.yaml` + `profiles/dev_windows.yaml` gộp đè, chọn bằng `RUN_PROFILE`/`--profile`. [preflight.py](preflight.py) kiểm 13 mục trước khi gọi LLM lần đầu. [run_experiment1.py](run_experiment1.py) là một lệnh chạy trọn. `scripts/` có 3 script không cần Docker.
+
+## Bốn quyết định thiết kế đáng nêu
+
+**Cách ly ablation bằng gỡ cài, không đổi tên module.** Tên `#[pymodule]` nằm **trong prompt**. Đổi nó theo nhánh thì hai prompt khác nhau ở *hai* biến chứ không phải một, và ablation mất giá trị. Nên hai nhánh dùng chung tên module, và `repo_runner.uninstall_extensions()` gỡ bản của nhánh trước ở 3 nơi (pip, `.so`/`.pyd` sót trong site-packages, shim `.py`) rồi **xác minh lại** bằng `find_spec`. Không tin vào việc đã gỡ — kiểm lại, vì nếu còn import được thì nhánh sau dùng nhầm bản build của nhánh trước và số liệu sai mà không báo lỗi.
+
+**Không thay repo `BASELINE_FAILED` bằng repo dự phòng.** Chỉ thay khi `INSTALL_FAILED` — đó là lỗi môi trường. `BASELINE_FAILED` là **dữ liệu thật về dataset**; thay nó đi là chọn mẫu theo kết quả.
+
+**`regression_free` giữ nghiêm ngặt, nhưng tách "fail" khỏi "skip".** Một test pass ở baseline mà **bị skip** ở lượt hybrid vẫn tính là mất (nghiêm ngặt), nhưng `regression_breakdown` ghi riêng `n_lost_now_failing` / `n_lost_now_skipped` / `n_lost_missing` và cả `regression_free_ignoring_skips`. Âm thầm bỏ qua test bị skip sẽ che đúng trường hợp bản Rust *gây ra* skip; không tách thì lại quy oan cho bản dịch.
+
+**Seed hai nhánh cố ý KHÁC nhau.** Cùng seed mà prompt khác nhau thì không có ý nghĩa gì — seed chỉ cố định dòng ngẫu nhiên cho *một* prompt. Ràng buộc cần có là "cùng (hotspot, arm, repeat) luôn ra cùng seed", tức chạy lại cho kết quả như cũ. Dùng SHA-256 thay `hash()` vì `hash()` của str bị ngẫu nhiên hoá theo tiến trình.
+
+## Lỗi thật phát hiện vòng này
+
+**`test_rebuild_measure.py` phụ thuộc thư mục ngoài repo.** Nó trỏ vào `.scratch/fake_ext/` nên hỏng ngay khi thư mục đó bị dọn. Đã sửa để tự dựng fixture trong thư mục tạm — test phải mang theo fixture của chính nó.
+
+**Mock backend hỏng lần thứ ba** khi chữ ký `chat()` mở rộng (`model` → `num_ctx`/`think` → `temperature`/`seed`). Đã đổi **toàn bộ** mock sang `chat(self, messages, system=None, **kwargs)` để lần mở rộng sau không kéo theo sửa test nữa.
+
+## Trạng thái lỗ hổng cũ còn lại
+
+| # | Lỗ hổng | Trạng thái |
+|---|---|---|
+| 14 | `regenerate_latest()` glob `raw_*.json` không thấy `pipeline_raw_*.json` | **ĐÃ SỬA** — pattern `*raw_*.json`, sắp theo mtime, thông báo lỗi nêu cả hai dạng tên file |
+| 12 | Không có số đo mức repo | **MỘT PHẦN, có chủ ý** — `duration_sec` của cả hai lượt test đã ghi, nhưng cố ý không trình bày như chỉ số hiệu năng: bộ test đo *tính đúng*, không phải workload |
+| 15 | Không pin CPU | **MỘT PHẦN** — `load_average` ghi được trên POSIX (tức là **có** trên máy thuê); vẫn chưa có `taskset` và chưa có bước xác nhận Ollama idle trước khi đo |
+
+Phát hiện mới ở vòng trước (FuncRank thiên về method của đối tượng có trạng thái) đã được **xử lý** bằng `candidate_pool` + lọc, thay vì sửa công thức FuncRank.
+
+## Bổ sung vào mục "chỉ xác nhận được trên máy thuê"
+
+Ngoài 8 mục đã liệt kê ở vòng trước, thêm:
+
+10. **`options.seed` có thật làm Ollama tất định hay không.** Ablation giả định điều đó. Nếu không đúng thì `repeats: 1` chưa đủ và phải tăng số lần lặp — và bảng so sánh theo cặp hiện tại sẽ phản ánh nhiễu lấy mẫu chứ không phản ánh context.
+11. **Gỡ cài extension `.so` thật giữa hai nhánh.** Trong test, "extension" chỉ là file `.py` nên việc gỡ dễ hơn thực tế. Trên máy thuê phải kiểm `still_importable` trong `stages.isolation` của nhánh thứ hai — nếu không rỗng thì **toàn bộ số liệu ablation của repo đó phải bỏ**.
+12. **`setup_linux.sh` với Ollama là PID 1.** Nhánh mở bản riêng ở cổng 11435 chưa chạy thật lần nào.
+13. **Thời gian thật cho 12 repo.** Ước từ 2 repo đã chạy (~17s/repo cho Pha A-B, không LLM/Rust). Có LLM + build Rust + 2 nhánh thì lâu hơn nhiều bậc; `max_wall_hours=6` là phỏng đoán chứ chưa có căn cứ đo.
+
+---
+
+# TRẠNG THÁI SAU KHI THI HÀNH PHA 0 → G
+
+**Cập nhật:** 2026-09-28, sau khi sửa 2 lỗ hổng chặn + 3 vấn đề đo lường.
+Phần audit gốc bên dưới được giữ NGUYÊN VĂN để đối chiếu.
+
+## Kết quả kiểm chứng đã chạy
+
+| Lượt kiểm chứng | Kết quả |
+|---|---|
+| Pha A+B trên `repo_gamma` (repo giả, 7 hàm) | **PASS** — cả 7 hàm ra đúng 1 lý do, đúng tầng |
+| Pha G toàn bộ đường động, 5 repo giả | **PASS** — `repo_gamma`/`repo_epsilon`=PARTIAL, 3 repo còn lại=BASELINE_FAILED |
+| Không có fallback âm thầm (Pha E) | **PASS** — Rust ném lỗi ⇒ 3/8 test fail, `REGRESSION_FREE=False` |
+| Chế độ LEGACY (`target.mode=function`) | **PASS** — vẫn đo đúng 4 hàm viraj7, không lạc sang đường động |
+| Exit code khi không đo được gì | **PASS** — exit code **2**, không còn báo thành công |
+| 9 test hồi quy cũ trong `.scratch/` | **PASS** (sau khi thêm `repo_oracle.enabled=false` — xem *Ghi chú test* cuối mục) |
+| **Pha A-B trên DATASET THẬT** (2 repo) | **CHẠY ĐƯỢC** — xem bảng ngay dưới |
+
+### Pha A-B trên dataset thật (máy dev, không LLM, không cargo)
+
+| Repo | Thời gian | repo_status | Bộ test baseline | Kết cục hotspot |
+|---|---|---|---|---|
+| `piskvorky_sqlitedict` | **20.3s** | `NO_MEASURABLE_HOTSPOT` | **95/95 pass** (9.1s) | 3× `UNREPLAYABLE_ARGS`, 1× `UNSUPPORTED_KIND` (generator), 1× `UNRESOLVABLE_IMPORT` |
+| `JoshData_pdf-redactor` | **13.4s** | `BASELINE_FAILED` | **0/1 pass** (3.7s) | cả 5 hotspot bị loại cùng repo |
+
+Đây là bằng chứng trực tiếp cho hai điều:
+
+* **Oracle mức repo hoạt động thật.** `sqlitedict` chạy 95/95 test qua venv riêng do pipeline tự dựng — tức là Pha A làm được đúng việc mà audit gốc nói là lỗ hổng chính.
+* **`BASELINE_FAILED` không phải tình huống giả định.** `pdf-redactor` fail sẵn 1/1 test khi chưa ai chạm tới Rust. Trước Pha A, lỗi đó sẽ bị tính cho bản hybrid.
+
+**PHÁT HIỆN MỚI (chưa có trong audit gốc), mức TRUNG:** FuncRank chọn hotspot thiên về **method của đối tượng có trạng thái**, mà đó đúng là nhóm khó dịch nhất. Trên `sqlitedict`, 3/5 hotspot là method của `SqliteMultithread` (giữ `_contextvars.Context`, `traceback`) nên không pickle được ⇒ không phát lại được ⇒ bị loại. Hệ quả thực tế: trên dataset thật, tỉ lệ hotspot đi được tới bước đo sẽ **thấp hơn nhiều** so với repo giả. *Đề xuất:* cho FuncRank cộng điểm cho hàm mà đối số đều là kiểu gốc (biết được sau một lượt Pha B thăm dò), hoặc lấy top-K lớn hơn rồi lọc theo tầng.
+
+---
+
+## Bảng chuyển trạng thái từng lỗ hổng
+
+| # | Lỗ hổng (audit gốc) | Trạng thái | Sửa ở đâu / vì sao chưa sửa |
+|---|---|---|---|
+| **1** | Registry hard-code 4 hàm viraj7 ⇒ không đo được repo nào, pipeline vẫn báo thành công | **ĐÃ SỬA** | Pha C: [versions/registry.py](versions/registry.py) dựng registry ĐỘNG từ `module:qualname` của chính repo; [repo_pipeline.py](repo_pipeline.py) là đường chạy mới. Chứng minh: `repo_gamma` có 3 hotspot `MEASURED`. Chế độ legacy vẫn dùng registry cứng, không đổi. |
+| **2** | Không có correctness mức repo, không có APR/SR | **ĐÃ SỬA** | Pha A+E: [stage5_compiler_in_the_loop/repo_runner.py](stage5_compiler_in_the_loop/repo_runner.py) chạy `pytest --junitxml`, parse ra `passed_ids`/`n_total`, tính `pass_rate`/SR; `dataset_apr_sr()` + `report.build_dataset_metrics_table()` cho APR/SR mức dataset; `baseline_failed()` gán `BASELINE_FAILED` và LOẠI repo khỏi mẫu. |
+| **3** | Baseline Python không đo lại ở vòng ≥2 ⇒ so hai cách đo khác nhau | **ĐÃ SỬA** | Pha F: [stage6_benchmark/_pair_runner.py](stage6_benchmark/_pair_runner.py) đo `python_pure` VÀ mọi bản Rust trong **cùng một tiến trình**, cùng đối số, cùng vòng lặp `warmup+N`, ở **mọi** vòng. |
+| **4** | `speedup` là MAX qua các vòng, có thể thuộc vòng `INITIAL` | **ĐÃ SỬA** | `HotspotRecord.accepted_speedup` + `accepted_round` = vòng được Decision Agent ACCEPT cuối cùng (phiên bản sẽ dùng thật). Best-of vẫn lưu nhưng ở khoá riêng `best_speedup_any_round`, và bảng ghi rõ nhãn. |
+| **5** | `hybrid_pyo3` chưa từng được kiểm correctness | **ĐÃ SỬA** | [stage1_profiling/_replay_runner.py](stage1_profiling/_replay_runner.py) so khớp **từng phiên bản** trong `rust_targets`. Chứng minh: `sum_squares` và `accumulate_inplace` có `rust_pure=MATCH` **và** `hybrid_pyo3=MATCH`. |
+| **6** | Không có metadata tái lập nào | **ĐÃ SỬA** | [env_metadata.py](env_metadata.py): CPU + số core, OS, Python, `rustc`/`cargo`/`maturin`/`uv`, git commit **kèm cờ `dirty`**, hostname, 2 tên model + 2 `num_ctx`, thời điểm, load average. Ghi vào `repo_summary_*.json`, `dataset_summary_*.json` và đầu `report_*_repos.md`. |
+| **7** | Không có shape/dtype input ⇒ không diễn giải được speedup | **ĐÃ SỬA** | `_pair_runner._describe_input()` ghi `input_spec` = kiểu quan sát được từng đối số + số phần tử, vào `repo_summary_*.json`. |
+| **8** | mean/median/std chỉ có trong stdout; `run_pipeline` không ghi `.md` | **ĐÃ SỬA** | `repo_pipeline._stats()` ghi `stats_ms` (mean/median/std/n) cho TỪNG phiên bản TỪNG vòng vào JSON; `_main_dynamic` ghi `report_<ts>_repos.md`; `bench_params` ghi `warmup`/`iterations`. |
+| **9** | Stage 6 đo & gọi Decision Agent cho cả hotspot mà Gate đã gạt | **ĐÃ SỬA** | Hotspot bị gate nhận `GATE_SKIPPED` ngay ở Stage 2 và không vào danh sách `eligible`, nên không tốn lời gọi LLM và không lẫn vào bảng. |
+| **10** | `correctness=ERROR` không chặn vòng tối ưu (chỉ `MISMATCH` chặn) | **ĐÃ SỬA** | Thay cơ chế: mọi hotspot có `reason` khác rỗng đều bị loại khỏi Pha D/E/F. Không còn đường nào cho hotspot không so được đi tiếp. |
+| **11** | `rtol`/`atol` và shape sample không vào file; MISMATCH bị cắt còn 1 dòng | **ĐÃ SỬA** | Mỗi mục `correctness[version]` ghi kèm `rtol`, `atol`, `n_matched`, `n_samples`, và `mismatches` (tối đa 10 mục) thay vì chỉ `detail`. |
+| **12** | Không có số đo mức repo (workload/test time) | **MỘT PHẦN — có chủ ý** | `baseline_tests.duration_sec` và `hybrid_tests.duration_sec` ĐÃ được ghi, nhưng cố ý **không** trình bày như chỉ số hiệu năng: bộ test RepoTransBench đo TÍNH ĐÚNG, không phải workload. Dùng nó làm số hiệu năng sẽ sai về phương pháp. Giới hạn này cần ghi vào luận văn. |
+| **13** | Không có timeout per-repo | **ĐÃ SỬA** | `repo_oracle.repo_time_budget_sec` (mặc định 1800s) kiểm ở 3 chốt trong `repo_pipeline`, cộng `test_timeout_sec` cho mỗi lượt pytest; vượt ⇒ status `TIMEOUT`. |
+| **14** | `report.regenerate_latest()` glob `raw_*.json` nên không thấy `pipeline_raw_*.json` | **CHƯA SỬA** | Ngoài phạm vi Pha 0→G và chỉ ảnh hưởng một tiện ích in lại báo cáo của chế độ legacy. Sửa 1 dòng: đổi pattern thành `*raw_*.json`. |
+| **15** | Không pin CPU, không ghi tải máy lúc đo | **MỘT PHẦN** | `env_metadata` ghi `load_average` (chỉ có trên POSIX, tức là CÓ trên máy Linux thuê). Vẫn **chưa** có `taskset`/CPU affinity và chưa có bước xác nhận Ollama đã idle trước khi đo. |
+| **16** | `pass_at_1=null` không phân biệt "Stage 5 tắt" với "thiếu cargo" | **ĐÃ SỬA** | Enum `HotspotReason` phân biệt `COMPILE_FAILED` / `BUILD_FAILED`, `stages.stage5.reason` ghi lý do bỏ qua, và `build_status` ghi riêng `BUILD_FAILED` vs `SKIPPED_NO_TOOLCHAIN`. |
+
+## Hai lỗi thật phát hiện trong lúc thi hành (đã sửa)
+
+1. **Mọi `subprocess.run(text=True)` giải mã stdout bằng cp1252 trên Windows.** Ngoại lệ `UnicodeDecodeError` bị thread đọc stdout nuốt, nên output của tiến trình con **mất âm thầm** mà không ai thấy lỗi. Ảnh hưởng cả `measure_subprocess.py` (parse JSON từ stdout). Đã thêm `encoding="utf-8", errors="replace"` cho cả 9 chỗ.
+2. **Stage 0 quét cả venv mà pipeline vừa tạo.** `.rtb_venv` nằm trong bản copy của repo, nên FuncRank xếp hạng hàm nội bộ của pytest (`__init__` trùng ở **354 nơi**) thay vì hàm của repo — hotspot chọn ra không phải code cần dịch. Đã thêm `.rtb_venv`, `.rtb_capture`, `.rtb_crates` vào `_IGNORE_DIR_NAMES` của `stage0_graph/builder.py`.
+
+## Ghi chú test
+
+5 test hồi quy cũ trong `.scratch/` đặt `target.mode="repo"`, mà từ nay `mode=repo` mặc định đi đường ĐỘNG. Đã thêm `cfg["repo_oracle"]["enabled"] = False` vào cả 5 để chúng tiếp tục kiểm thử đúng đường chạy cũ. Ngoài ra `test_gen.py` có `FakeBackend` chỉ định nghĩa `generate()` — nó đã hỏng từ trước lượt này (khi `AgentSession` chuyển sang gọi `chat()`); đã thêm `chat(self, messages, system=None, **kwargs)` dùng `**kwargs` để lần mở rộng chữ ký sau không làm hỏng mock nữa.
+
+## Chỉ xác nhận được trên máy Linux thuê
+
+Mọi kết quả trên đạt được **không có** Rust toolchain, **không có** GPU, **không có** LLM thật. Những điều sau vẫn chưa kiểm chứng được:
+
+1. **`cargo check` và `maturin develop` thật.** Máy dev không có `cargo`/`maturin` (metadata in ra `(không có)`). Trong Pha G, `compile_and_classify` và `build_crate` bị thay bằng bản giả: "extension Rust" thực chất là một module Python cùng tên hàm. Toàn bộ đường ống (import, so khớp, hoán đổi, đo, build lại giữa các vòng) đã được kiểm, nhưng **bản thân việc biên dịch Rust thì chưa**.
+2. **Code Rust do LLM sinh có biên dịch được không, và Pass@1/DSR@1 thật là bao nhiêu.** Prompt Tầng 1/Tầng 2 và ánh xạ kiểu (`list[float]` → `Vec<f64>`, mutate tại chỗ → `&Bound<'_, PyList>`) mới chỉ được kiểm bằng backend giả. Đây là ẩn số lớn nhất còn lại.
+3. **Tầng 2 (kernel + shim) với PyO3 thật.** Shim Python trong Pha G là do tôi viết tay trong test, không phải do LLM sinh. Chưa biết LLM có trả đúng khối `## Python shim` khớp chữ ký hàm gốc hay không.
+4. **`maturin develop` cài extension vào venv RIÊNG của từng repo.** Cơ chế truyền `VIRTUAL_ENV` + `--interpreter` chưa chạy thật lần nào.
+5. **Lời gọi LLM thật tới Ollama:** 2 model, `options.num_ctx`, `think: false`, lọc `<think>`, và liệu ~28GB VRAM có nạp nổi cả hai model cùng lúc.
+6. **Toàn bộ 171 repo của dataset.** Đã chạy thật **2 repo** (33.7s tổng). Chưa biết: `repo_time_budget_sec=1800` có đủ cho repo lớn, `pip install -e .` fail ở bao nhiêu repo, và tỉ lệ hotspot đi được tới bước đo trên toàn dataset — mà phát hiện ở `sqlitedict` cho thấy tỉ lệ này sẽ thấp.
+7. **`load_average`** chỉ có trên POSIX nên trên máy dev luôn `null`; chỉ máy Linux thuê mới ghi được.
+8. **Profiling động (Scalene).** `graph.build_mode` để `static` trong mọi lượt chạy; đường `dynamic` (POLO Eq.1-2) không nằm trong phạm vi Pha 0→G.
+
+---
+
+## (a) Bảng checklist (AUDIT GỐC — giữ nguyên để đối chiếu)
 
 ### PHẦN 1 — CORRECTNESS
 

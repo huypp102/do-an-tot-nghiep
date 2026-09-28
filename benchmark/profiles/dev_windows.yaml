@@ -1,0 +1,45 @@
+# Profile cho máy DEV Windows -- chạy thử đường ống mà không cần GPU/cargo/LLM.
+#
+#     RUN_PROFILE=dev_windows python run_pipeline.py
+#
+# Mục đích: kiểm tra pipeline còn chạy end-to-end sau khi sửa code, dùng repo
+# giả trong data/fake_dataset/. KHÔNG dùng profile này để lấy số liệu.
+#
+# Không hard-code đường dẫn: `RTB_WORK_DIR` để trống thì code tự dùng thư mục
+# tạm của hệ điều hành. Trên máy dev hiện tại ổ C: hay hết chỗ, nên đặt
+# RTB_WORK_DIR=D:/rtb_work trước khi chạy.
+
+llm:
+  # Máy dev không có Ollama -> tắt. Muốn thử đường LLM thì dùng backend giả
+  # trong benchmark/tests/ (xem tests/README hoặc lệnh chạy toàn bộ test).
+  enabled: false
+
+dataset:
+  enabled: true
+  # Repo giả, cố ý mỗi repo nhắm vào một lý do loại khác nhau.
+  source_root: "data/fake_dataset"
+  max_repos: 0
+
+graph:
+  # static: không cần Scalene, chạy nhanh.
+  build_mode: static
+  candidate_pool: 30
+  top_k_translate: 5
+
+ablation:
+  # Ablation cần LLM -> tắt trên máy dev, bật trong pilot_linux.
+  enabled: false
+
+repo_oracle:
+  enabled: true
+  keep_venv: false
+  cleanup_work_dir: false
+  test_timeout_sec: 300
+  repo_time_budget_sec: 900
+
+experiment:
+  max_wall_hours: 1
+  screening_limit: 10
+  min_replayable_hotspots: 1
+  n_repos: 3
+  n_backup_repos: 1

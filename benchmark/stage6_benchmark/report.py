@@ -213,9 +213,18 @@ def regenerate_latest(results_dir: Path | None = None) -> str:
     """Đọc file raw_*.json mới nhất trong results/ và in lại report (không
     cần chạy lại benchmark)."""
     d = results_dir or (BENCHMARK_ROOT / "results")
-    raw_files = sorted(d.glob("raw_*.json"))
+    # Pattern `*raw_*.json` (không phải `raw_*.json`): `bench.py` ghi
+    # `raw_<ts>.json` còn `run_pipeline.py` ghi `pipeline_raw_<ts>.json`. Pattern
+    # cũ neo vào đầu tên file nên không bao giờ thấy file của run_pipeline --
+    # tiện ích này khi đó chỉ dùng được cho output của bench.py.
+    raw_files = sorted(
+        d.glob("*raw_*.json"), key=lambda p: (p.stat().st_mtime, p.name)
+    )
     if not raw_files:
-        raise FileNotFoundError(f"Không tìm thấy file raw_*.json nào trong {d}")
+        raise FileNotFoundError(
+            f"Không tìm thấy file *raw_*.json nào trong {d} "
+            f"(bench.py ghi raw_<ts>.json, run_pipeline.py ghi pipeline_raw_<ts>.json)"
+        )
     latest = raw_files[-1]
     with latest.open("r", encoding="utf-8") as f:
         all_results = json.load(f)
@@ -227,3 +236,215 @@ def regenerate_latest(results_dir: Path | None = None) -> str:
 
 if __name__ == "__main__":
     regenerate_latest()
+
+
+# ===========================================================================
+# PHA F -- bảng cho chế độ REPO ĐỘNG.
+#
+# Khác các bảng ở trên (chế độ legacy, workload là 1 ảnh):
+#   * speedup báo cáo là của VÒNG ĐƯỢC ACCEPT cuối cùng -- tức phiên bản sẽ
+#     thật sự được dùng -- KHÔNG phải MAX qua các vòng (lỗ hổng #4). Best-of
+#     vẫn được lưu nhưng ở khoá riêng, có nhãn rõ ràng.
+#   * mọi hotspot đều có mặt kèm LÝ DO, kể cả hotspot không đo được -- chấm
+#     dứt việc hotspot lặng lẽ biến mất khỏi bảng.
+# ===========================================================================
+def build_hotspot_reason_table(hotspots: list[dict]) -> str:
+    """Bảng per-hotspot: lý do cuối cùng + tầng + correctness + speedup."""
+    lines: list[str] = []
+    lines.append("HOTSPOT: LÝ DO CUỐI CÙNG + KẾT QUẢ")
+    lines.append("=" * 100)
+    header = (
+        f"{'hotspot':<20}{'lý do':<22}{'tầng':<12}{'corr rust/hyb':>15}"
+        f"{'speedup accept':>16}{'vòng':>6}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    if not hotspots:
+        lines.append("(không có hotspot nào)")
+        return "\n".join(lines)
+
+    for h in hotspots:
+        corr = h.get("correctness") or {}
+
+        def _c(version: str, _corr=corr) -> str:
+            entry = _corr.get(version) or {}
+            return {"MATCH": "OK", "MISMATCH": "LỆCH", "ERROR": "ERR"}.get(
+                entry.get("status"), "-")
+
+        acc = h.get("accepted_speedup") or {}
+        sp = acc.get("rust_pure", acc.get("hybrid_pyo3"))
+        sp_text = "n/a" if sp is None else f"{sp:.2f}x"
+        rounds = h.get("rounds") or []
+        rounds_text = str(len(rounds)) + ("*" if h.get("stopped_by_cap") else "")
+        tier = (h.get("tier") or "-").replace("TIER1_", "1:").replace("TIER2_", "2:")
+        lines.append(
+            f"{str(h.get('function', '?')):<20}{str(h.get('reason', '?')):<22}"
+            f"{tier:<12}{_c('rust_pure') + '/' + _c('hybrid_pyo3'):>15}"
+            f"{sp_text:>16}{rounds_text:>6}"
+        )
+
+    lines.append("")
+    lines.append("lý do: chỉ MEASURED là đo được đầy đủ; giá trị khác giải thích vì sao bị loại.")
+    lines.append("tầng: 1=kiểu gốc -> Rust thuần; 2=đối tượng -> kernel Rust + shim Python.")
+    lines.append(
+        "speedup accept: của VÒNG ĐƯỢC ACCEPT CUỐI CÙNG (phiên bản sẽ dùng thật), "
+        "KHÔNG phải max qua các vòng."
+    )
+    lines.append("vòng: số vòng tối ưu đã chạy; * = dừng vì chạm trần max_rounds.")
+    return "\n".join(lines)
+
+
+def build_round_detail_table(hotspots: list[dict]) -> str:
+    """Bảng THEO TỪNG VÒNG: mean/median/std của từng phiên bản + build_status."""
+    lines: list[str] = []
+    lines.append("CHI TIẾT THEO VÒNG (mean/median/std tính bằng ms)")
+    lines.append("=" * 100)
+    header = (
+        f"{'hotspot':<18}{'vòng':>5}{'build_status':>18}{'phiên bản':<14}"
+        f"{'mean':>10}{'median':>10}{'std':>9}{'n':>4}{'speedup':>9}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    any_row = False
+    for h in hotspots:
+        for entry in h.get("rounds") or []:
+            stats = entry.get("stats_ms") or {}
+            speedups = entry.get("speedup") or {}
+            for version in ("python_pure", "rust_pure", "hybrid_pyo3"):
+                s = stats.get(version)
+                if not s:
+                    continue
+                any_row = True
+                name = str(h.get("function", "?"))
+                bstat = str(entry.get("build_status", "?"))
+                rnd = entry.get("round", "?")
+                if "error" in s:
+                    lines.append(
+                        f"{name:<18}{rnd:>5}{bstat:>18}{version:<14}"
+                        f"{'(' + str(s['error'])[:36] + ')':>42}"
+                    )
+                    continue
+                sp = speedups.get(version)
+                sp_text = "baseline" if version == "python_pure" else (
+                    "n/a" if sp is None else f"{sp:.2f}x")
+                lines.append(
+                    f"{name:<18}{rnd:>5}{bstat:>18}{version:<14}"
+                    f"{s['mean_ms']:>10.4f}{s['median_ms']:>10.4f}"
+                    f"{s['std_ms']:>9.4f}{s['n']:>4}{sp_text:>9}"
+                )
+    if not any_row:
+        lines.append("(không vòng đo nào chạy được)")
+    lines.append("")
+    lines.append(
+        "Cả 3 phiên bản trong cùng một vòng được đo trong CÙNG một tiến trình, "
+        "CÙNG bộ đối số thật, CÙNG vòng lặp warmup+N -> tỉ số hợp lệ ở mọi vòng."
+    )
+    return "\n".join(lines)
+
+
+def build_repo_table(repo_rows: list[dict]) -> str:
+    """BẢNG CUỐI cho luận văn: MỘT DÒNG MỘT REPO.
+
+    Đúng các cột yêu cầu ở Pha F: repo | status | số hotspot | MEASURED |
+    compile_ok | correctness_match_rate (rust, hybrid) | baseline_tests |
+    hybrid_tests | REGRESSION_FREE | speedup accept (rust, hybrid) | số vòng.
+    """
+    lines: list[str] = []
+    lines.append("BẢNG KẾT QUẢ THEO REPO")
+    lines.append("=" * 118)
+    header = (
+        f"{'repo':<22}{'status':<23}{'hs':>4}{'meas':>6}{'comp_ok':>8}"
+        f"{'corr_rust':>10}{'corr_hyb':>9}{'base_test':>11}{'hyb_test':>10}"
+        f"{'reg_free':>9}{'sp_rust':>9}{'sp_hyb':>8}{'vòng':>6}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    def _pct(v) -> str:
+        return "n/a" if v is None else f"{v * 100:.0f}%"
+
+    def _x(v) -> str:
+        return "n/a" if v is None else f"{v:.2f}x"
+
+    for row in repo_rows:
+        m = row.get("metrics") or {}
+        corr = m.get("correctness_match_rate") or {}
+        sp = m.get("mean_accepted_speedup") or {}
+        rf = m.get("regression_free")
+        rounds = m.get("mean_rounds")
+        rounds_text = "n/a" if rounds is None else f"{rounds:.1f}"
+        rf_text = "yes" if rf else ("NO" if rf is False else "n/a")
+        lines.append(
+            f"{str(row.get('label', '?'))[:21]:<22}"
+            f"{str(row.get('repo_status', '?')):<23}"
+            f"{m.get('n_hotspots', 0):>4}{m.get('n_measured', 0):>6}"
+            f"{_pct(m.get('compile_ok')):>8}"
+            f"{_pct(corr.get('rust_pure')):>10}{_pct(corr.get('hybrid_pyo3')):>9}"
+            f"{str(m.get('baseline_tests') or 'n/a'):>11}"
+            f"{str(m.get('hybrid_tests') or 'n/a'):>10}"
+            f"{rf_text:>9}"
+            f"{_x(sp.get('rust_pure')):>9}{_x(sp.get('hybrid_pyo3')):>8}"
+            f"{rounds_text:>6}"
+        )
+
+    lines.append("")
+    lines.append(
+        "status: OK=mọi hotspot đo được | PARTIAL=một phần | "
+        "NO_MEASURABLE_HOTSPOT=không đo được gì | BASELINE_FAILED=bộ test gốc đã "
+        "fail sẵn (repo bị LOẠI khỏi so sánh) | INSTALL_FAILED | TIMEOUT."
+    )
+    lines.append(
+        "reg_free (REGRESSION_FREE): tập test pass của hybrid CHỨA TOÀN BỘ tập "
+        "pass của baseline. 'NO' = có hồi quy, xem `regressed_tests` trong JSON."
+    )
+    lines.append(
+        "sp_*: trung bình speedup của vòng được ACCEPT, chỉ tính hotspot MEASURED."
+    )
+    return "\n".join(lines)
+
+
+def build_dataset_metrics_table(repo_rows: list[dict]) -> str:
+    """APR / SR mức DATASET theo định nghĩa RepoTransBench (arXiv:2412.17744).
+
+    APR = TRUNG BÌNH tỉ lệ test pass qua các repo (mỗi repo một phiếu).
+    SR  = tỉ lệ repo pass TOÀN BỘ test.
+
+    Repo `BASELINE_FAILED` / `INSTALL_FAILED` bị LOẠI khỏi mẫu chứ không tính
+    là 0: đó là lỗi môi trường hoặc lỗi có sẵn của repo, không phải chất lượng
+    bản dịch. Tính là 0 sẽ kéo APR xuống vì lý do không liên quan.
+    """
+    counted = [
+        r for r in repo_rows
+        if (r.get("metrics") or {}).get("hybrid_pass_rate") is not None
+    ]
+    excluded = [r for r in repo_rows if r not in counted]
+
+    lines: list[str] = []
+    lines.append("APR / SR MỨC DATASET (RepoTransBench)")
+    lines.append("=" * 72)
+    if not counted:
+        lines.append("(không repo nào chạy được cả 2 lượt test -> chưa tính được APR/SR)")
+    else:
+        n = len(counted)
+        b_rates = [(r["metrics"].get("baseline_pass_rate") or 0.0) for r in counted]
+        h_rates = [r["metrics"]["hybrid_pass_rate"] for r in counted]
+        b_sr = sum(1 for r in counted if r["metrics"].get("baseline_pass_rate") == 1.0)
+        h_sr = sum(1 for r in counted if r["metrics"]["hybrid_pass_rate"] == 1.0)
+        n_rf = sum(1 for r in counted if r["metrics"].get("regression_free"))
+        lines.append(f"  số repo tính vào mẫu : {n}")
+        lines.append(f"  APR baseline         : {sum(b_rates) / n * 100:.1f}%")
+        lines.append(f"  APR hybrid           : {sum(h_rates) / n * 100:.1f}%")
+        lines.append(f"  SR  baseline         : {b_sr}/{n} ({b_sr / n * 100:.1f}%)")
+        lines.append(f"  SR  hybrid           : {h_sr}/{n} ({h_sr / n * 100:.1f}%)")
+        lines.append(f"  REGRESSION_FREE      : {n_rf}/{n} ({n_rf / n * 100:.1f}%)")
+    if excluded:
+        lines.append("")
+        lines.append(
+            f"  bị LOẠI khỏi mẫu ({len(excluded)} repo) -- lý do môi trường/repo, "
+            "không phải chất lượng bản dịch:"
+        )
+        for r in excluded:
+            lines.append(f"    - {r.get('label')}: {r.get('repo_status')}")
+    return "\n".join(lines)

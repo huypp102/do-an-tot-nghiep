@@ -61,6 +61,14 @@ class ModelBackend(abc.ABC):
 
     name: str = "base"
 
+    # PHẦN 2.5 -- số liệu của LỜI GỌI GẦN NHẤT, để tầng trên ghi vào kết quả.
+    # Cần cho ablation: nhánh `graph` có prompt dài hơn nên dễ bị Ollama cắt
+    # hơn; hotspot bị cắt ở bất kỳ nhánh nào phải bị gắn CONFOUNDED và tách ra
+    # khỏi phép so sánh, nếu không kết quả sẽ lệch theo đúng chiều bất lợi cho
+    # nhánh `graph`.
+    last_prompt_tokens: int | None = None
+    last_truncated: bool = False
+
     @abc.abstractmethod
     def chat(
         self,
@@ -69,6 +77,8 @@ class ModelBackend(abc.ABC):
         model: str | None = None,
         num_ctx: int | None = None,
         think: bool | None = None,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> str:
         """Gửi cả lịch sử hội thoại `messages` (list {"role", "content"}) kèm
         `system` prompt (vai trò của agent), trả về text trả lời.
@@ -83,6 +93,13 @@ class ModelBackend(abc.ABC):
         tác dụng với backend local dùng API native của Ollama).
         `think`: tắt/bật chế độ suy nghĩ của model reasoning (Ollama). None
         nghĩa là để mặc định của model.
+
+        `temperature` và `seed`: BẮT BUỘC cho thực nghiệm ablation (PHẦN 2.3).
+        Hai nhánh chỉ được khác nhau ở phần context trong prompt, nên mọi thứ
+        khác phải giống hệt -- kể cả độ ngẫu nhiên. `seed` cố định theo
+        (hotspot, arm, repeat) làm lời gọi lặp lại được; `temperature` thấp
+        (0.2) giảm phương sai giữa hai nhánh. Chỉ backend local dùng API
+        native của Ollama chở được 2 tham số này.
 
         Raise `ModelBackendError` nếu không gọi được."""
         raise NotImplementedError
@@ -133,10 +150,23 @@ class ApiModelBackend(ModelBackend):
         model: str | None = None,
         num_ctx: int | None = None,
         think: bool | None = None,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> str:
         # num_ctx/think là khái niệm của Ollama; Anthropic API không có tương
         # đương nên bỏ qua (cửa sổ ngữ cảnh do model quy định).
         model_name = model or self.model
+        # PHẦN 2.5: vẫn ghi ước lượng độ dài prompt để báo cáo ablation có số
+        # liệu này ở MỌI backend. `truncated=False` vì Anthropic API trả lỗi rõ
+        # ràng khi vượt cửa sổ thay vì lặng lẽ cắt như Ollama.
+        n_chars = sum(len(m.get("content") or "") for m in messages) + len(system or "")
+        self.last_prompt_tokens = int(n_chars / 3.5)
+        self.last_truncated = False
+        if seed is not None or temperature is not None:
+            logger.debug(
+                "ApiModelBackend bỏ qua temperature/seed (SDK Anthropic dùng "
+                "tham số khác); ablation nên chạy trên backend local."
+            )
         kwargs: dict = {
             "model": model_name,
             "max_tokens": self.max_tokens,
@@ -199,7 +229,7 @@ class LocalModelBackend(ModelBackend):
 
     def _warn_if_prompt_too_long(
         self, full_messages: list[dict[str, str]], num_ctx: int | None, model_name: str
-    ) -> None:
+    ) -> tuple[int, bool]:
         """Ước lượng thô số token (≈ ký tự / 3.5) và cảnh báo nếu vượt num_ctx.
 
         Ollama KHÔNG báo lỗi khi prompt dài quá cửa sổ ngữ cảnh -- nó lặng lẽ
@@ -207,10 +237,12 @@ class LocalModelBackend(ModelBackend):
         gốc, và model sẽ trả lời lạc đề mà không ai biết vì sao. Nên phải tự
         cảnh báo ở đây.
         """
-        if not num_ctx:
-            return
         n_chars = sum(len(m.get("content") or "") for m in full_messages)
         est_tokens = int(n_chars / 3.5)
+        if not num_ctx:
+            # Không biết cửa sổ ngữ cảnh -> không kết luận được là có bị cắt.
+            # Vẫn trả về ước lượng token để báo cáo độ dài prompt (PHẦN 2.6).
+            return est_tokens, False
         if est_tokens > num_ctx:
             logger.warning(
                 "Prompt gửi model '%s' ước tính %d token (%d ký tự / 3.5) > "
@@ -220,6 +252,8 @@ class LocalModelBackend(ModelBackend):
                 "cho KV cache) hoặc giảm lượng context đưa vào prompt.",
                 model_name, est_tokens, n_chars, num_ctx,
             )
+            return est_tokens, True
+        return est_tokens, False
 
     def _post_json(self, url: str, payload: dict) -> str:
         data = json.dumps(payload).encode("utf-8")
@@ -248,6 +282,8 @@ class LocalModelBackend(ModelBackend):
         model: str | None = None,
         num_ctx: int | None = None,
         think: bool | None = None,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> str:
         model_name = model or self.model
         # Cả 2 kiểu API đều nhận system prompt là message đầu tiên
@@ -259,7 +295,9 @@ class LocalModelBackend(ModelBackend):
             num_ctx if num_ctx else "(mặc định của model)",
             "(mặc định)" if think is None else think,
         )
-        self._warn_if_prompt_too_long(full_messages, num_ctx, model_name)
+        self.last_prompt_tokens, self.last_truncated = self._warn_if_prompt_too_long(
+            full_messages, num_ctx, model_name
+        )
 
         if self.api_style == "openai":
             if num_ctx:
@@ -269,13 +307,24 @@ class LocalModelBackend(ModelBackend):
                     "llm.local.api_style sang 'ollama' nếu cần đặt num_ctx.",
                     num_ctx,
                 )
-            url = f"{self.base_url}/v1/chat/completions"
-            body = self._post_json(url, {
+            if seed is not None:
+                logger.warning(
+                    "api_style=openai: seed=%d KHÔNG chắc có tác dụng (tuỳ server "
+                    "có hỗ trợ trường `seed` của OpenAI API hay không). Ablation "
+                    "cần seed cố định -> nên dùng api_style='ollama'.", seed,
+                )
+            openai_payload: dict = {
                 "model": model_name,
                 "messages": full_messages,
                 "max_tokens": self.max_tokens,
                 "stream": False,
-            })
+            }
+            if temperature is not None:
+                openai_payload["temperature"] = float(temperature)
+            if seed is not None:
+                openai_payload["seed"] = int(seed)
+            url = f"{self.base_url}/v1/chat/completions"
+            body = self._post_json(url, openai_payload)
             try:
                 return json.loads(body)["choices"][0]["message"]["content"]
             except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
@@ -293,6 +342,12 @@ class LocalModelBackend(ModelBackend):
         }
         if num_ctx:
             payload["options"]["num_ctx"] = int(num_ctx)
+        # PHẦN 2.3 -- kiểm soát nhiễu cho ablation. `seed` cố định làm lời gọi
+        # lặp lại được; `temperature` thấp giảm phương sai giữa 2 nhánh.
+        if temperature is not None:
+            payload["options"]["temperature"] = float(temperature)
+        if seed is not None:
+            payload["options"]["seed"] = int(seed)
         if think is not None:
             payload["think"] = bool(think)
 

@@ -173,6 +173,129 @@ Các chỉ số chi tiết hơn (DSR@1, phân loại lỗi biên dịch từng v
 được tính và lưu trong `results/pipeline_summary_*.json`, nhưng không hiện ở
 bảng này để người đọc tập trung vào 4 con số quan trọng nhất.
 
+## Thực nghiệm 1 trên máy Linux thuê
+
+Đúng 5 bước. Không cần Docker.
+
+### Bước 1 — Clone
+
+```bash
+git clone <repo-của-bạn> && cd <repo>/benchmark
+```
+
+### Bước 2 — Đặt biến môi trường
+
+Mọi giá trị phụ thuộc máy nằm ở đây, **không có đường dẫn nào hard-code trong code**:
+
+```bash
+export DATASET_DRIVE_ID=<id file Google Drive chứa dataset>   # chỉ cần lần đầu
+export RTB_WORK_DIR=/mnt/data/rtb_work    # ổ còn nhiều chỗ; để trống thì dùng thư mục tạm hệ thống
+export RUN_PROFILE=pilot_linux
+# 2 biến dưới đây setup_linux.sh sẽ in ra sau khi chạy xong:
+# export REPOTRANSBENCH_ROOT=...
+# export OLLAMA_BASE_URL=...
+```
+
+`DATASET_DRIVE_ID` cố ý **không** nằm trong repo: id đó thuộc về người chạy, không thuộc về source.
+
+### Bước 3 — Dựng môi trường
+
+```bash
+bash scripts/setup_linux.sh
+```
+
+Idempotent — chạy lại bao nhiêu lần cũng được, mỗi bước tự kiểm tra trước khi làm. Nó lo: gói apt, rustup, venv, `requirements.txt` + maturin + gdown, tải và giải nén dataset (kiểm đủ 171 repo), khởi động Ollama **chỉ nghe localhost** với `OLLAMA_MAX_LOADED_MODELS=2` và `OLLAMA_KEEP_ALIVE=30m`, pull 2 model.
+
+Nếu image thuê đã có `ollama serve` làm **PID 1**, script **không giết** nó (giết PID 1 có thể làm sập container) mà mở bản riêng ở cổng `11435` rồi in ra `OLLAMA_BASE_URL` cần dùng.
+
+Cuối cùng nó in đúng các lệnh `export` còn lại — copy và chạy.
+
+### Bước 4 — Chạy
+
+```bash
+bash scripts/run_pilot.sh
+```
+
+Chạy `nohup` nên mất SSH không mất lượt chạy. Script in cách theo dõi:
+
+```bash
+tail -f results/<run_id>/pilot.log
+ls results/<run_id>/repos/          # repo nào đã xong (ghi NGAY khi xong)
+curl -s $OLLAMA_BASE_URL/api/ps     # 2 model có cùng nạp không
+nvidia-smi
+```
+
+Bị cắt giữa đường thì chạy tiếp, bỏ qua **cặp (repo, nhánh)** đã xong:
+
+```bash
+bash scripts/run_pilot.sh --resume --run-id <run_id>
+```
+
+Muốn xem kế hoạch trước khi tốn giờ GPU: `python run_experiment1.py --profile pilot_linux --dry-run`.
+
+**Preflight chạy đầu tiên và dừng ngay nếu thiếu thứ gì** — thiếu `cargo`/`maturin`/Ollama/dataset, hoặc `REPOTRANSBENCH_ROOT` trỏ nhầm vào `target_projects`. Nó dừng **trước** lời gọi LLM đầu tiên, nên không đốt giờ GPU vô ích. Chạy riêng được: `python preflight.py --profile pilot_linux`.
+
+### Bước 5 — Thu kết quả
+
+```bash
+bash scripts/collect_results.sh <run_id>
+# rồi chạy TRÊN MÁY CÁ NHÂN lệnh scp mà script in ra
+```
+
+File cần đọc trong `results/<run_id>/`:
+
+| File | Nội dung |
+|---|---|
+| `metadata.json` | môi trường, kết quả preflight, **quy tắc chọn mẫu**, repo bị loại kèm lý do |
+| `selection.json` | ứng viên, repo được chọn, repo dự phòng |
+| `report.md` | phễu + bảng theo repo + APR/SR + ablation |
+| `funnel.json` | phễu dạng máy đọc được |
+| `ablation_report.{md,json}` | so sánh theo cặp nhánh `graph` vs `none` |
+| `repos/<repo>.json` | từng repo: lý do từng hotspot, số đo từng vòng |
+| `arm_cache/` | kết quả từng (repo, nhánh) — nguồn cho `--resume` |
+
+### Thiên lệch chọn mẫu — phải nêu trong luận văn
+
+12 repo **không phải mẫu ngẫu nhiên** từ 171 repo. Chúng là những repo đầu tiên theo thứ tự tên mà bộ test gốc chạy được **và** có ≥ 2 hotspot ghi/phát lại được đối số. Quy tắc này được chốt **trước** khi xem kết quả và ghi nguyên văn vào `metadata.json` cùng lý do loại từng repo.
+
+Lý do phải sàng: đo thật trên `piskvorky_sqlitedict` cho thấy **5/5 hotspot hạng cao bị loại** — 3 trong đó là method của đối tượng giữ `_contextvars.Context` nên không pickle được. Lấy thẳng top-5 thì thường còn 0 hotspot để dịch, và ablation không có gì để so.
+
+### Hai profile
+
+| | `dev_windows` | `pilot_linux` |
+|---|---|---|
+| LLM | tắt | `local`, 2 agent |
+| `num_ctx` | mặc định | 16384 / 8192 (VRAM cho 2 model) |
+| dataset | `data/fake_dataset` | thật, 12 repo |
+| ablation | tắt | bật, 2 nhánh |
+| `build_mode` | `static` | `dynamic` (POLO Eq.1-2) |
+| ngân sách | 1h | 6h |
+
+`config.yaml` chỉ chứa **mặc định trung tính**; profile gộp đè lên nó. Chọn bằng `RUN_PROFILE` hoặc `--profile`. Sai tên profile thì **báo lỗi kèm danh sách có sẵn** chứ không im lặng chạy bằng mặc định.
+
+### Chạy toàn bộ test
+
+```bash
+python tests/run_all.py            # bỏ nhóm cần dataset thật
+python tests/run_all.py --fast     # chỉ nhóm nhanh (~30s)
+python tests/run_all.py --list     # xem phân nhóm
+python tests/run_all.py --with-dataset   # gồm cả nhóm cần REPOTRANSBENCH_ROOT
+```
+
+## Việc chỉ xác nhận được trên máy thuê
+
+Toàn bộ kết quả hiện có đạt được **không có** Rust toolchain, **không có** GPU, **không có** LLM thật. Những điều sau chưa kiểm chứng được:
+
+1. **`cargo check` và `maturin develop` thật.** Trong test, bước build bị thay bằng module Python cùng tên hàm. Cả đường ống (import, so khớp, hoán đổi, đo, build lại giữa các vòng) đã được kiểm, nhưng **việc biên dịch Rust thì chưa**.
+2. **Code Rust do LLM sinh có biên dịch được không, Pass@1 thật bao nhiêu.** Prompt Tầng 1/Tầng 2 và ánh xạ kiểu (`list[float]` → `Vec<f64>`, sửa-tại-chỗ → `&Bound<'_, PyList>`) mới chỉ chạy với backend giả. Đây là ẩn số lớn nhất còn lại.
+3. **Tầng 2 (kernel + shim) với PyO3 thật.** Shim trong test do tôi viết tay, chưa biết LLM có trả đúng khối `## Python shim` khớp chữ ký hàm gốc hay không.
+4. **`maturin develop` cài vào venv RIÊNG của từng repo**, và việc **gỡ cài giữa hai nhánh ablation** trên extension `.so` thật (trong test chỉ là file `.py`).
+5. **Ollama thật:** 2 model, `options.num_ctx`, `options.seed`, `temperature`, `think: false`, và liệu ~28GB VRAM có nạp nổi cả hai model cùng lúc — `preflight` kiểm mục này bằng `ollama ps` nhưng chưa chạy thật lần nào.
+6. **`options.seed` có thật sự làm Ollama tất định hay không.** Ablation giả định điều đó; nếu không đúng thì `repeats: 1` là chưa đủ và cần tăng số lần lặp.
+7. **Toàn bộ 171 repo.** Đã chạy thật **2 repo** (33.7s). Chưa biết `repo_time_budget_sec=1800` có đủ cho repo lớn, `pip install -e .` fail ở bao nhiêu repo, và tỉ lệ hotspot đi tới bước đo trên toàn dataset.
+8. **`load_average`** chỉ có trên POSIX nên trên máy dev luôn `null`.
+9. **`build_mode: dynamic` (Scalene)** — profile `pilot_linux` bật nó, nhưng mọi lượt chạy tới nay đều dùng `static`.
+
 ## Chạy trên máy thuê GPU (Docker)
 
 Repo này **không chứa dataset và không hardcode đường dẫn máy nào**. Máy thuê
@@ -366,6 +489,94 @@ target:
 dẫn local cho Stage 0. Lần chạy sau dùng lại bản đã clone (không tốn mạng).
 Clone lỗi (repo private, mất mạng, URL sai) → log rõ, bỏ qua phần cần target
 đó, không crash. `data/cloned_repos/` đã được `.gitignore`.
+
+## Hai đường chạy: LEGACY và REPO ĐỘNG
+
+Từ khi có oracle mức repo, `run_pipeline.py` có **hai** đường chạy tách hẳn nhau.
+`_dynamic_mode_selected()` chọn đường, và chọn sai đường là nguồn nhầm lẫn lớn
+nhất khi đọc kết quả, nên phần này nói rõ.
+
+| | LEGACY | REPO ĐỘNG |
+|---|---|---|
+| Bật khi | `target.mode: function` | `target.mode: file\|repo`, hoặc `dataset.enabled: true` |
+| | (và/hoặc `repo_oracle.enabled: false`) | **và** `repo_oracle.enabled: true` |
+| Hàm được đo | 4 hàm viraj7 trong `PIPELINE_REGISTRY` (cứng) | hàm THẬT của repo, nạp theo `module:qualname` |
+| Workload | 1 ảnh mẫu từ `data/sample_input/` | **đối số thật** do bộ test của repo tạo ra |
+| Oracle đúng đắn | so output hàm-với-hàm trên 3 sample ảnh | so trên đối số thật **+ chạy lại cả bộ test của repo** |
+| Cách đo | in-process, `time.perf_counter()` | 1 tiến trình con trong venv của repo, **cả 3 phiên bản cùng tiến trình** |
+| File kết quả | `pipeline_raw_*.json`, `pipeline_summary_*.json` | `repo_summary_<ts>_<repo>.json`, `report_<ts>_repos.md` |
+| Cần LLM | không (code Rust điền tay) | **có** — chữ ký mỗi hotspot mỗi khác, phải sinh |
+
+Đường LEGACY **không đổi gì** so với trước: nó vẫn là cách để đo 4 hàm ảnh đã
+điền tay. Muốn bắt `mode: repo` chạy lại đường cũ thì đặt
+`repo_oracle.enabled: false`.
+
+### Đường REPO ĐỘNG làm gì, theo thứ tự
+
+1. **Copy repo** ra `repo_oracle.work_root` — dataset mount chỉ đọc, mà pytest
+   cần ghi cache và bước build cần chèn extension vào.
+2. **Venv riêng cho repo** (dùng `uv` nếu có), cài `requirements.txt` hoặc
+   `pip install -e .`, cộng `pytest` + `cloudpickle`. Lỗi ⇒ `INSTALL_FAILED`.
+3. **Stage 0** dựng PCG/PSG trên bản copy, FuncRank chọn top-K hotspot.
+4. **Stage 2** Decision Gate ⇒ hotspot bị gạt nhận `GATE_SKIPPED`.
+5. **Ghi đối số thật**: chạy bộ test GỐC kèm plugin
+   `stage1_profiling/capture_plugin.py`, lưu tối đa `max_captured_calls` lời gọi
+   mỗi hotspot (args, kwargs, giá trị trả về, exception, **và trạng thái đối số
+   SAU lời gọi** để bắt hàm sửa tại chỗ).
+6. **Phát lại 2 lần** trên chính bản Python. Lệch ⇒ `NONDETERMINISTIC`.
+   Đồng thời **phân tầng kiểu** từ đối số thật.
+7. **Stage 3/4** sinh Rust theo **chữ ký thật** (không phải theo type-hint).
+8. **Stage 5** `cargo check` trên crate riêng từng hotspot + vòng sửa lỗi.
+9. **Build** `maturin develop --release` vào venv của repo — **Tầng 1 xong
+   trước, rồi mới Tầng 2**; Tầng 2 hỏng không chặn Tầng 1.
+10. **So khớp** bản Rust với bản Python trên đối số thật, cho **cả**
+    `rust_pure` **và** `hybrid_pyo3`.
+11. **Chạy lại bộ test** với hotspot đã thay bằng Rust ⇒ `hybrid_tests`,
+    `REGRESSION_FREE`.
+12. **Đo tốc độ** cả 3 phiên bản trong cùng tiến trình, rồi vòng tối ưu.
+
+### Hai tầng chữ ký (Tầng do CODE quyết định, không hỏi LLM)
+
+| Tầng | Khi nào | Rust nhận gì | `hybrid_pyo3` trỏ vào |
+|---|---|---|---|
+| `TIER1_NATIVE` | mọi đối số là kiểu gốc (số, str, bytes, list/dict của kiểu gốc, ndarray) | đúng chữ ký, có kiểu | chính hàm Rust |
+| `TIER2_KERNEL` | có đối tượng tuỳ ý, nhưng thuộc tính là kiểu gốc | chỉ các **trường** kiểu gốc | **shim Python** tháo đối tượng rồi gọi kernel |
+| ngoài 2 tầng | còn lại | — | `UNSUPPORTED_KIND` |
+
+Để `repo_oracle.signature_support: native_only` nếu chỉ muốn số liệu Tầng 1:
+hotspot cần shim sẽ bị loại thành `UNSUPPORTED_KIND` thay vì đo một thứ khác.
+
+### Mỗi hotspot rời pipeline với ĐÚNG MỘT lý do
+
+Không còn hotspot nào lặng lẽ biến mất khỏi bảng. Enum đầy đủ trong
+[outcomes.py](outcomes.py):
+
+`MEASURED` · `UNSUPPORTED_KIND` · `UNREPLAYABLE_ARGS` · `NOT_COVERED_BY_TESTS` ·
+`NONDETERMINISTIC` · `UNRESOLVABLE_IMPORT` · `COMPILE_FAILED` ·
+`CORRECTNESS_FAILED` · `NO_IMPLEMENTATION` · `GATE_SKIPPED` · `LLM_FAILED` ·
+`BUILD_FAILED` · `MEASURE_FAILED`
+
+Và mỗi repo có một `repo_status`: `OK` · `PARTIAL` · `NO_MEASURABLE_HOTSPOT` ·
+`BASELINE_FAILED` · `INSTALL_FAILED` · `TIMEOUT`.
+
+**`summary["ok"]` chỉ `true` khi có ≥1 hotspot `MEASURED`**, và
+`run_pipeline.py` **thoát với exit code 2** nếu cả lượt chạy không đo được gì.
+Trước đây pipeline luôn trả 0 kể cả khi bảng kết quả toàn `n/a`.
+
+`BASELINE_FAILED` nghĩa là bộ test Python của repo **đã fail sẵn** khi chưa ai
+chạm tới Rust. Repo đó bị **LOẠI khỏi mẫu** APR/SR — lỗi có sẵn của repo không
+được tính cho bản hybrid.
+
+### An toàn khi chạy code repo lạ
+
+Test của repo trong dataset là code của người khác, chạy với quyền của tiến
+trình này. `repo_runner.build_child_env()` **lọc sạch** mọi biến môi trường
+khớp `*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS` cộng
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` trước khi spawn — lọc theo hậu tố nên biến
+mới thêm sau này cũng tự động bị lọc.
+
+Venv của repo bị xoá sau mỗi repo (`keep_venv: false`). Chạy cả dataset mà giữ
+lại venv sẽ làm đầy đĩa máy thuê rất nhanh.
 
 ## 3 cấp độ benchmark (function / file / repo)
 

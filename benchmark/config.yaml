@@ -107,6 +107,78 @@ correctness:
   rtol: 0.00001    # 1e-5, cho np.allclose / math.isclose
   atol: 0.00000001 # 1e-8
 
+# ----------------------------------------------------------------------------
+# PHA A..F -- Oracle MỨC REPO: chạy chính bộ test Python của repo làm chuẩn.
+#
+# VÌ SAO CẦN: so output hàm-với-hàm không chứng minh được "thay hotspot bằng
+# Rust mà repo vẫn chạy đúng". Với bản hybrid (chỉ vài hàm là Rust), oracle
+# đúng phải là BỘ TEST GỐC của repo.
+#
+# Mục này CHỈ dùng khi target.mode = file|repo hoặc dataset.enabled = true.
+# Chế độ legacy (target.mode=function, 4 hàm viraj7) KHÔNG đọc mục này.
+# ----------------------------------------------------------------------------
+repo_oracle:
+  enabled: true
+
+  # Dataset được mount CHỈ ĐỌC, mà pytest cần ghi cache và Pha D cần chèn
+  # extension -> phải copy repo ra đây trước khi chạy.
+  # Để TRỐNG -> code tự dùng `tempfile.gettempdir()/rtb_work`, hợp cả Linux
+  # lẫn Windows. Đặt RTB_WORK_DIR nếu muốn chỉ định (vd ổ đĩa còn nhiều chỗ).
+  work_root: "${RTB_WORK_DIR:-}"
+
+  # Xoá venv sau mỗi repo. Để true khi cần gỡ lỗi 1 repo cụ thể; chạy cả
+  # dataset thì PHẢI để false, nếu không đĩa máy thuê đầy rất nhanh.
+  keep_venv: false
+  # Xoá luôn bản copy repo (giữ lại thì còn xem được crate + shim đã sinh).
+  cleanup_work_dir: false
+
+  # Giới hạn thời gian.
+  test_timeout_sec: 600        # mỗi lần chạy pytest (baseline, rồi hybrid)
+  repo_time_budget_sec: 1800   # cả repo, kể cả build Rust và gọi LLM
+
+  # Pha B -- ghi đối số thật.
+  max_captured_calls: 20       # số lời gọi ghi lại cho MỖI hotspot
+  max_arg_bytes: 5242880       # 5MB cho MỖI đối số; vượt -> UNREPLAYABLE_ARGS
+
+  # Pha D -- phạm vi chữ ký Rust hỗ trợ.
+  # "extended"    (mặc định): Tầng 1 (kiểu gốc -> Rust thuần) + Tầng 2 (đối
+  #               tượng -> kernel Rust + shim Python tháo/đóng gói).
+  # "native_only": CHỈ Tầng 1. Hotspot cần shim bị loại thành UNSUPPORTED_KIND
+  #               thay vì đo một thứ khác -- dùng khi cần số liệu "sạch".
+  signature_support: "${RTB_SIGNATURE_SUPPORT:-extended}"
+
+# ----------------------------------------------------------------------------
+# PHẦN 2 -- ABLATION: có và không có context graph.
+#
+# MỤC TIÊU: đo RIÊNG tác động của context lân cận PCG/PSG lên chất lượng code
+# Rust do Generator sinh, theo thiết kế đối chứng của POLO (một vòng, bỏ đa
+# vòng để không lẫn tác động của vòng tối ưu vào tác động của context).
+#
+# HAI NHÁNH CHỈ KHÁC ĐÚNG MỘT THỨ trong prompt:
+#   graph -- có khối "Context lân cận của hotspot" (hàm gọi hotspot, hàm
+#            hotspot gọi, lớp chứa nó, tham chiếu tĩnh).
+#   none  -- BỎ HẲN khối đó. VẪN giữ: source hotspot, chữ ký, kiểu đối số
+#            quan sát được, ví dụ vào/ra từ test. Mấy thứ này là đặc tả tối
+#            thiểu để viết được chữ ký PyO3, KHÔNG tính là context graph --
+#            bỏ chúng đi thì hai nhánh thành hai bài toán khác nhau.
+#
+# Cả hai prompt sinh từ CÙNG một hàm build (`generator_agent.
+# build_signature_prompt`), khác nhau bởi cờ `include_graph_context`.
+# ----------------------------------------------------------------------------
+ablation:
+  enabled: false
+  arms: [graph, none]
+  repeats: 1
+  # Seed GỐC. Seed thật của mỗi lời gọi = hash ổn định của
+  # (seed, repo, hotspot, arm, repeat) -- xem ablation.py::seed_for.
+  seed: 1234
+  # Nhiệt độ thấp cho cả 2 nhánh: giảm phương sai để chênh lệch quan sát được
+  # phản ánh context chứ không phản ánh may mắn lấy mẫu.
+  temperature: 0.2
+  # Số cặp bất đồng tối thiểu để được phép kết luận thống kê. Dưới ngưỡng này
+  # báo cáo CHỈ in số đếm kèm ghi chú cỡ mẫu nhỏ, không kết luận.
+  min_discordant_pairs: 10
+
 compiler_loop:
   enabled: true
   # Số lần gọi lại Generator Agent để sửa lỗi biên dịch, TRƯỚC khi bỏ cuộc.
@@ -192,6 +264,21 @@ target:
 graph:
   # Số hàm hotspot (theo FuncRank) được chọn làm ứng viên benchmark.
   top_k_hotspots: 5
+
+  # --- Chọn hotspot cho CHẾ ĐỘ REPO ĐỘNG (không ảnh hưởng chế độ legacy) ---
+  #
+  # VÌ SAO TÁCH LÀM 2 SỐ: trên dataset thật, phần lớn hotspot hạng cao bị loại
+  # ở bước ghi/phát lại đối số (đo được trên piskvorky_sqlitedict: 5/5 hotspot
+  # bị loại, 3 trong đó là method của đối tượng giữ `_contextvars.Context`).
+  # Lấy thẳng top-5 thì thường còn 0 hotspot để dịch, và ablation không có gì
+  # để so. Nên: lấy POOL rộng, lọc bằng tiêu chí khách quan (phát lại được +
+  # thuộc Tầng 1/2), rồi giữ `top_k_translate` hotspot ĐẦU TIÊN THEO ĐÚNG THỨ
+  # TỰ FUNCRANK.
+  #
+  # CÔNG THỨC FUNCRANK KHÔNG ĐỔI và KHÔNG có điểm cộng thủ công nào -- thứ tự
+  # vẫn thuần FuncRank, chỗ này chỉ mở rộng phạm vi xét rồi lọc.
+  candidate_pool: 30
+  top_k_translate: 5
 
   # "static"  (MẶC ĐỊNH, hành vi CŨ giữ nguyên): PCG chỉ từ phân tích tĩnh
   #            (tree-sitter/ast), FuncRank = PageRank thuần trên cấu trúc

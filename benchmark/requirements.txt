@@ -31,3 +31,18 @@ scalene>=1.5              # công cụ đã chốt cho Stage 1 (thay Callgrind, 
 # maturin         # build extension Rust cho hybrid_pyo3 / rust_pure/pyo3_ext (`maturin develop --release`)
 # anthropic       # nếu hiện thực ApiModelBackend bằng Anthropic SDK trong stage4_llm_transpile/model_backend.py
 # requests        # nếu hiện thực LocalModelBackend gọi Ollama/vLLM qua HTTP
+
+# ---------------------------------------------------------------------------
+# BẮT BUỘC cho chế độ REPO ĐỘNG (oracle mức repo + ghi/phát lại đối số thật).
+# Không cần cho chế độ legacy (target.mode=function).
+# ---------------------------------------------------------------------------
+cloudpickle>=3.0   # pickle đối số thật của repo (pickle chuẩn không đủ:
+                   # không xử lý được hàm/closure/lớp định nghĩa động)
+pytest>=7.0        # chạy bộ test GỐC của repo làm oracle mức repo.
+                   # LƯU Ý: pipeline còn tự cài pytest + cloudpickle vào venv
+                   # RIÊNG của từng repo (xem repo_runner.install_repo) -- hai
+                   # chỗ này khác nhau, cái ở đây là cho tiến trình điều phối.
+
+# Cần cho PHA D (build extension Rust cho từng hotspot). Không có thì pipeline
+# vẫn chạy và báo SKIPPED_NO_TOOLCHAIN chứ không sập.
+maturin>=1.0

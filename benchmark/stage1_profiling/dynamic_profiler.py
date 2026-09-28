@@ -338,7 +338,7 @@ def _run_scalene(
     env["PYTHONUTF8"] = "1"
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, env=env)
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning("Chạy Scalene lỗi (%s: %s) -- bỏ qua phần bổ sung.", type(exc).__name__, exc)
         return None

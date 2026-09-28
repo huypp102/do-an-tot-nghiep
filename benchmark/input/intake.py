@@ -147,7 +147,7 @@ def clone_github_repo(
     logger.info("Đang clone %s -> %s ...", url, dest)
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SEC
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=CLONE_TIMEOUT_SEC
         )
     except subprocess.TimeoutExpired as exc:
         _cleanup_partial_clone(dest)

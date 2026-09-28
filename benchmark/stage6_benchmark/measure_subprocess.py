@@ -57,7 +57,7 @@ def measure_in_subprocess(
         ]
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_sec
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec
             )
         except subprocess.TimeoutExpired:
             return None, f"đo trong subprocess quá {timeout_sec}s -> huỷ"
@@ -93,3 +93,77 @@ def measure_in_subprocess(
             tmp_dir.rmdir()
         except OSError:
             pass
+
+
+# ===========================================================================
+# PHA F -- đo MỌI phiên bản trong CÙNG 1 tiến trình (chế độ repo động).
+#
+# Khác `measure_in_subprocess` ở trên: hàm đó chỉ đo MỘT phiên bản (rust_pure)
+# và dùng ảnh làm workload, nên khi so với số Python đo in-process thì hai bên
+# không cùng điều kiện (lỗ hổng #3). Hàm dưới đây đo python_pure VÀ các bản
+# Rust trong cùng một tiến trình, cùng bộ đối số thật, cùng vòng lặp
+# warmup + N -- tỉ số lấy ra mới là tỉ số hợp lệ.
+# ===========================================================================
+PAIR_RUNNER = Path(__file__).resolve().parent / "_pair_runner.py"
+
+
+def measure_pair_in_repo_venv(
+    venv_python: Path,
+    work_dir: Path,
+    capture_dir: Path,
+    benchmark_root: Path,
+    targets: dict,
+    warmup: int = 5,
+    iterations: int = 20,
+    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+) -> tuple[dict, str]:
+    """Spawn `_pair_runner.py` trong venv CỦA REPO.
+
+    `targets`: {tên hotspot: {phiên bản: đặc tả}} -- lấy từ
+        `versions/registry.py::DynamicRegistry`. Đặc tả của `python_pure` có
+        khoá `module`/`qualname`; của bản Rust có `ext_module`/`ext_func`.
+
+    Trả về (kết quả, lỗi mức tiến trình). KHÔNG raise.
+    """
+    import os
+
+    from stage5_compiler_in_the_loop.repo_runner import build_child_env
+
+    capture_dir = Path(capture_dir)
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    targets_path = capture_dir / "pair_targets.json"
+    out_path = capture_dir / "pair_measurements.json"
+    targets_path.write_text(json.dumps(targets, ensure_ascii=False), encoding="utf-8")
+
+    cmd = [
+        str(venv_python), str(PAIR_RUNNER),
+        "--capture-dir", str(capture_dir),
+        "--targets", str(targets_path),
+        "--out", str(out_path),
+        "--warmup", str(warmup),
+        "--iterations", str(iterations),
+    ]
+    env = build_child_env({
+        "PYTHONPATH": os.pathsep.join(
+            [str(Path(benchmark_root).resolve()), str(Path(work_dir).resolve())]
+        ),
+    })
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout_sec, cwd=str(work_dir), env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {}, f"đo ghép cặp quá {timeout_sec}s -> huỷ"
+    except OSError as exc:
+        return {}, f"không spawn được tiến trình đo: {exc}"
+
+    if not out_path.exists():
+        return {}, (
+            f"tiến trình đo không ghi được kết quả (exit={proc.returncode}). "
+            f"stderr: {(proc.stderr or '')[-500:]}"
+        )
+    try:
+        return json.loads(out_path.read_text(encoding="utf-8")), ""
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"không đọc được kết quả đo: {exc}"

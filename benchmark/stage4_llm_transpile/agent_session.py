@@ -64,6 +64,11 @@ class AgentSession:
         self.think = think
         self.max_history_turns = max_history_turns
         self._messages: list[dict[str, str]] = []
+        # Số liệu của lượt gọi GẦN NHẤT (PHẦN 2.5). Giữ trên session chứ không
+        # đọc trực tiếp từ backend vì hai vai trò dùng chung một backend, giá
+        # trị ở đó sẽ bị vai trò kia ghi đè trước khi ta đọc.
+        self.last_prompt_tokens: int | None = None
+        self.last_truncated: bool = False
 
     @property
     def messages(self) -> list[dict[str, str]]:
@@ -86,10 +91,19 @@ class AgentSession:
                 self.role_name, dropped, self.max_history_turns,
             )
 
-    def send(self, content: str) -> str:
+    def send(
+        self,
+        content: str,
+        temperature: float | None = None,
+        seed: int | None = None,
+    ) -> str:
         """Gửi 1 lượt người dùng, nhận trả lời, LƯU cả hai vào lịch sử RIÊNG
         của agent này. Raise ModelBackendError nếu gọi model thất bại (lúc
-        đó lượt hỏng KHÔNG được ghi vào lịch sử, tránh làm bẩn ngữ cảnh)."""
+        đó lượt hỏng KHÔNG được ghi vào lịch sử, tránh làm bẩn ngữ cảnh).
+
+        `temperature`/`seed`: dùng cho ablation (PHẦN 2.3). Sau lời gọi,
+        `last_prompt_tokens` và `last_truncated` mang số liệu của lượt vừa rồi
+        -- tầng trên đọc để gắn CONFOUNDED cho hotspot bị cắt prompt."""
         pending = self._messages + [{"role": "user", "content": content}]
         logger.info(
             "[%s] gửi lượt thứ %d tới model '%s' (%d ký tự).",
@@ -102,7 +116,13 @@ class AgentSession:
             model=self.model,
             num_ctx=self.num_ctx,
             think=self.think,
+            temperature=temperature,
+            seed=seed,
         )
+        # Sao lại số liệu của lời gọi vừa rồi: backend dùng chung cho nhiều
+        # session nên giá trị trên backend sẽ bị session khác ghi đè.
+        self.last_prompt_tokens = getattr(self.backend, "last_prompt_tokens", None)
+        self.last_truncated = bool(getattr(self.backend, "last_truncated", False))
 
         # Chỉ ghi vào lịch sử KHI gọi thành công.
         self._messages = pending + [{"role": "assistant", "content": reply}]

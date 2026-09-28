@@ -38,6 +38,12 @@ logger = logging.getLogger("benchmark.stage0_graph.builder")
 _IGNORE_DIR_NAMES = {
     "__pycache__", ".git", ".venv", "venv", "env", "target",
     "node_modules", ".pytest_cache", ".mypy_cache", ".idea", ".vscode",
+    # --- Thư mục do PHA A..D tạo BÊN TRONG bản copy của repo ---
+    # Bắt buộc phải loại: `.rtb_venv` chứa toàn bộ pytest + phụ thuộc của repo,
+    # nên nếu quét vào đó thì FuncRank xếp hạng hàm nội bộ của pytest
+    # (`__init__` trùng 354 nơi) thay vì hàm của repo, và hotspot chọn ra
+    # không phải code cần dịch.
+    ".rtb_venv", ".rtb_capture", ".rtb_crates",
 }
 
 # --- Chọn backend: tree-sitter (thật, ưu tiên) hay ast (fallback tạm thời) ---
