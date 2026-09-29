@@ -76,6 +76,19 @@ class CrateResult:
     crate_dir: str = ""
     shim_module: str = ""
     output: str = ""
+    # --- Chẩn đoán maturin (BƯỚC 2) ---------------------------------------
+    # `output` bị cắt còn 2000 ký tự khi ghi JSON, và dòng log trước đây chỉ in
+    # "exit=%d" nên người đọc pilot.log không thấy lỗi thật. Ở pilot 2 điều đó
+    # làm mất 42/42 chẩn đoán: nguyên nhân duy nhất (`--interpreter` không hợp
+    # lệ) nằm trong stdout/stderr mà không ai đọc tới.
+    #
+    # `maturin_error` giữ NGUYÊN VĂN, không cắt -- đây là log cho người debug,
+    # không phải prompt gửi LLM.
+    maturin_cmd: list[str] = field(default_factory=list)
+    maturin_returncode: int | None = None
+    maturin_stdout: str = ""
+    maturin_stderr: str = ""
+    maturin_error: str = ""
 
     @property
     def ok(self) -> bool:
@@ -123,15 +136,32 @@ class CrateResult:
             "tier": self.tier, "ext_module": self.ext_module,
             "ext_func": self.ext_func, "shim_module": self.shim_module,
             "crate_dir": self.crate_dir, "output": self.output[:2000],
+            # KHÔNG cắt `maturin_error`: mất nó là mất luôn khả năng chẩn đoán.
+            "maturin_cmd": self.maturin_cmd,
+            "maturin_returncode": self.maturin_returncode,
+            "maturin_error": self.maturin_error,
+            "maturin_stdout": self.maturin_stdout,
+            "maturin_stderr": self.maturin_stderr,
         }
 
 
-def toolchain_available() -> tuple[bool, str]:
-    """cargo + maturin có trên máy không."""
+def toolchain_available(venv_python: Path | None = None) -> tuple[bool, str]:
+    """cargo + maturin có dùng được không.
+
+    `venv_python`: nếu truyền vào, maturin được coi là có khi nó nằm TRONG venv
+    đó (`python -m maturin`) HOẶC trên PATH. Cần vậy vì đường đi chắc chắn là
+    `python -m maturin` của venv repo, và ở đường đó maturin không cần có trên
+    PATH hệ thống.
+    """
     if shutil.which("cargo") is None:
         return False, "không thấy `cargo` trong PATH (chưa cài Rust toolchain)"
+    if venv_python is not None and venv_has_maturin(Path(venv_python)):
+        return True, ""
     if shutil.which("maturin") is None:
-        return False, "không thấy `maturin` trong PATH (`pip install maturin`)"
+        return False, (
+            "không thấy `maturin` -- không có trên PATH và cũng không có trong "
+            "venv của repo (`pip install maturin`)"
+        )
     return True, ""
 
 
@@ -243,6 +273,56 @@ def make_crate(
     return result
 
 
+def maturin_command(venv_python: Path) -> tuple[list[str], str]:
+    """Lệnh gọi maturin và cách chọn venv ĐÍCH. Trả về (cmd, mô tả cách chọn).
+
+    HAI SỬA CÓ CƠ SỞ từ log thật của pilot 2:
+
+    1. BỎ `--interpreter`. `maturin develop` KHÔNG có cờ đó (chỉ `maturin build`
+       mới có). Truyền vào thì clap báo lỗi dùng sai và thoát **exit 2** trước
+       khi build một dòng nào. Đó là toàn bộ nguyên nhân 42/42 crate qua được
+       `cargo check` vẫn thất bại ở đây:
+
+           error: unexpected argument '--interpreter' found
+           Usage: maturin develop --release [ARGS]...
+
+    2. Gọi `python -m maturin` BẰNG CHÍNH python của `.rtb_venv`, không gọi
+       `maturin` theo PATH. `maturin develop` cài extension vào venv mà nó coi
+       là đang active, và cách chắc chắn nhất để chỉ đúng venv đó là chạy nó
+       bằng interpreter của venv đó. Dựa vào `VIRTUAL_ENV` một mình là mơ hồ:
+       nếu biến đó bị mất hoặc maturin lấy từ PATH của venv khác, module sẽ
+       được cài vào venv SAI -- và bước so khớp correctness sau đó không import
+       được, một lỗi im lặng khó truy hơn nhiều so với exit 2.
+
+    Lùi về `maturin` theo PATH khi venv của repo chưa có maturin, để không đổi
+    hành vi thành "không build được gì" trên máy chưa cài vào venv riêng.
+    """
+    py = Path(venv_python)
+    if venv_has_maturin(py):
+        return (
+            [str(py), "-m", "maturin", "develop", "--release"],
+            f"python -m maturin bằng interpreter của venv repo ({py})",
+        )
+    return (
+        ["maturin", "develop", "--release"],
+        "maturin theo PATH (venv của repo chưa có maturin -- venv đích chỉ được "
+        "xác định qua VIRTUAL_ENV, kém chắc chắn hơn)",
+    )
+
+
+def venv_has_maturin(venv_python: Path) -> bool:
+    """Venv này có `maturin` import được không. KHÔNG raise."""
+    try:
+        proc = subprocess.run(
+            [str(venv_python), "-c", "import maturin"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=60,
+        )
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def build_crate(
     result: CrateResult,
     venv_python: Path,
@@ -256,7 +336,7 @@ def build_crate(
     """
     from stage5_compiler_in_the_loop.repo_runner import build_child_env
 
-    available, why = toolchain_available()
+    available, why = toolchain_available(venv_python)
     if not available:
         result.status = SKIPPED_NO_TOOLCHAIN
         result.output = why
@@ -265,12 +345,19 @@ def build_crate(
 
     crate_dir = Path(result.crate_dir)
     venv_dir = Path(venv_python).parent.parent
+    cmd, how = maturin_command(venv_python)
     env = build_child_env({
-        # maturin develop cài vào venv đang "active" -- chỉ ra bằng VIRTUAL_ENV.
+        # Vẫn đặt VIRTUAL_ENV: maturin dùng nó để biết cài vào đâu. Khi chạy
+        # `python -m maturin` bằng interpreter của venv thì đây là lớp thứ hai,
+        # không phải lớp duy nhất.
         "VIRTUAL_ENV": str(venv_dir),
         "PATH": os.pathsep.join([str(Path(venv_python).parent), os.environ.get("PATH", "")]),
     })
-    cmd = ["maturin", "develop", "--release", "--interpreter", str(venv_python)]
+    result.maturin_cmd = list(cmd)
+    logger.info(
+        "Pha D [%s]: %s | cwd=%s | %s",
+        result.function_name, " ".join(cmd), crate_dir, how,
+    )
 
     try:
         proc = subprocess.run(
@@ -281,19 +368,37 @@ def build_crate(
     except subprocess.TimeoutExpired:
         result.status = BUILD_FAILED
         result.output = f"maturin develop quá {timeout_sec}s -> huỷ"
+        result.maturin_error = result.output
+        logger.error("Pha D [%s]: %s", result.function_name, result.output)
         return result
     except OSError as exc:
         result.status = BUILD_FAILED
         result.output = f"không chạy được maturin: {exc}"
+        result.maturin_error = f"{result.output}\nlệnh: {' '.join(cmd)}"
+        logger.error("Pha D [%s]: %s", result.function_name, result.maturin_error)
         return result
 
+    result.maturin_returncode = proc.returncode
+    result.maturin_stdout = proc.stdout or ""
+    result.maturin_stderr = proc.stderr or ""
     combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+
     if proc.returncode != 0:
         result.status = BUILD_FAILED
         result.output = combined[-3000:]
+        # BƯỚC 2: giữ NGUYÊN VĂN và IN RA LOG. Trước đây dòng log chỉ có
+        # "exit=%d" nên toàn bộ chẩn đoán nằm im trong JSON, không ai đọc tới.
+        result.maturin_error = (
+            f"lệnh   : {' '.join(cmd)}\n"
+            f"cwd    : {crate_dir}\n"
+            f"cách chọn venv: {how}\n"
+            f"exit   : {proc.returncode}\n"
+            f"--- stdout ---\n{proc.stdout or '(rỗng)'}\n"
+            f"--- stderr ---\n{proc.stderr or '(rỗng)'}"
+        )
         logger.error(
-            "Pha D [%s]: maturin develop THẤT BẠI (exit=%d).",
-            result.function_name, proc.returncode,
+            "Pha D [%s]: maturin develop THẤT BẠI (exit=%d).\n%s",
+            result.function_name, proc.returncode, result.maturin_error,
         )
         return result
 

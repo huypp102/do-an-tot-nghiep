@@ -360,6 +360,181 @@ def check_pyo3_example_compiles(timeout_sec: int = 600) -> Check:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def check_maturin_develop_works(timeout_sec: int = 900) -> Check:
+    """Chạy THẬT `maturin develop` trên khuôn mẫu PyO3, vào một venv dùng một lần.
+
+    VÌ SAO PHẢI TÁCH KHỎI `pyo3_example_compiles`: `cargo check` và
+    `maturin develop` kiểm HAI VIỆC KHÁC NHAU ở HAI TẦNG khác nhau.
+      * `cargo check` chỉ kiểm cú pháp/kiểu/borrow-checker -- không sinh
+        artifact, không đóng gói, không cài đi đâu.
+      * `maturin develop` mới thực sự build `.so`/`.pyd`, đóng gói thành package
+        Python và CÀI vào venv để `import` được.
+    Ở pilot 2, `cargo check` đạt 77% (42/54) nhưng `maturin develop` thất bại
+    **100%** (42/42 crate có code) vì một lỗi dùng sai dòng lệnh:
+
+        error: unexpected argument '--interpreter' found
+        Usage: maturin develop --release [ARGS]...
+
+    `maturin develop` không có cờ `--interpreter` (chỉ `maturin build` mới có),
+    nên clap thoát exit 2 trước khi build một dòng nào. `cargo check` xanh
+    không nói gì về việc này -- đó là lý do phải có phép kiểm riêng ở đây.
+
+    Phép kiểm này đi trọn đường: tạo venv -> cài maturin vào venv đó -> dựng
+    crate từ chính `PYO3_EXAMPLE` -> `maturin develop` bằng ĐÚNG lệnh mà
+    `crate_builder.maturin_command()` sinh ra -> `import` module vừa cài. Chỉ
+    khi `import` thành công thì mới coi là đạt.
+    """
+    import re as _re
+
+    from stage4_llm_transpile.generator_agent import PYO3_API_VERSION, PYO3_EXAMPLE
+    from stage5_compiler_in_the_loop.crate_builder import (
+        CARGO_TOML_TEMPLATE,
+        PYO3_VERSION,
+        RUST_EDITION,
+        maturin_command,
+    )
+
+    if shutil.which("cargo") is None:
+        return Check(
+            "maturin_develop_works", True, required=False,
+            detail="bỏ qua -- không có cargo (chỉ kiểm được trên máy có Rust toolchain)",
+            fix=(
+                "trên máy thuê PHẢI chạy được mục này. `cargo check` xanh KHÔNG "
+                "chứng minh maturin develop chạy được -- pilot 2 đã chứng minh "
+                "điều đó (77% vs 0%)."
+            ),
+        )
+
+    ext = "preflight_maturin_probe"
+    blocks = _re.findall(
+        r"```rust\s*\n(.*?)```",
+        PYO3_EXAMPLE.format(pyo3_version=PYO3_API_VERSION, ext_module=ext),
+        flags=_re.DOTALL,
+    )
+    if not blocks:
+        return Check(
+            "maturin_develop_works", False,
+            detail="không tách được khối ```rust nào từ PYO3_EXAMPLE",
+            fix="kiểm tra lại generator_agent.PYO3_EXAMPLE",
+        )
+
+    tmp = Path(tempfile.mkdtemp(prefix="preflight_maturin_"))
+    try:
+        # 1. venv dùng một lần, dựng đúng như pipeline dựng venv cho repo.
+        venv_dir = tmp / "venv"
+        if shutil.which("uv"):
+            code, out = _run(["uv", "venv", str(venv_dir), "--python", sys.executable], 300)
+        else:
+            code, out = _run([sys.executable, "-m", "venv", str(venv_dir)], 300)
+        py = venv_dir / ("Scripts" if os.name == "nt" else "bin") / (
+            "python.exe" if os.name == "nt" else "python")
+        if code != 0 or not py.exists():
+            return Check(
+                "maturin_develop_works", False,
+                detail=f"không tạo được venv thử: {out[-400:]}",
+                fix="xem mục venv_creation",
+            )
+
+        # 2. maturin VÀO venv đó -- đúng như repo_runner.install_repo làm.
+        if shutil.which("uv"):
+            code, out = _run(["uv", "pip", "install", "--python", str(py), "maturin"], 600)
+        else:
+            code, out = _run([str(py), "-m", "pip", "install", "-q", "maturin"], 600)
+        if code != 0:
+            return Check(
+                "maturin_develop_works", False,
+                detail=f"không cài được maturin vào venv thử: {out[-400:]}",
+                fix="`pip install maturin` -- cần cho `python -m maturin develop`",
+            )
+
+        # 3. Crate từ chính khuôn mẫu trong prompt.
+        crate = tmp / "crate"
+        (crate / "src").mkdir(parents=True, exist_ok=True)
+        (crate / "Cargo.toml").write_text(
+            CARGO_TOML_TEMPLATE.format(
+                function_name="preflight_probe", ext_module=ext,
+                edition=RUST_EDITION, pyo3=PYO3_VERSION,
+            ),
+            encoding="utf-8",
+        )
+        (crate / "pyproject.toml").write_text(
+            "[build-system]\nrequires = [\"maturin>=1.0,<2.0\"]\n"
+            "build-backend = \"maturin\"\n\n"
+            f"[project]\nname = \"{ext}\"\nversion = \"0.1.0\"\n"
+            "requires-python = \">=3.9\"\n\n"
+            f"[tool.maturin]\nmodule-name = \"{ext}\"\n",
+            encoding="utf-8",
+        )
+        (crate / "src" / "lib.rs").write_text("\n".join(blocks), encoding="utf-8")
+
+        # 4. ĐÚNG lệnh mà crate_builder sinh ra -- không phải một lệnh maturin
+        #    tay đơn giản. Nếu lệnh đó sai thì phép kiểm này phải hỏng.
+        cmd, how = maturin_command(py)
+        env = dict(os.environ)
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        env["PATH"] = os.pathsep.join([str(py.parent), env.get("PATH", "")])
+        env["PIP_NO_INPUT"] = "1"
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(crate), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                timeout=timeout_sec, env=env,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return Check(
+                "maturin_develop_works", False,
+                detail=f"không chạy được `{' '.join(cmd)}`: {exc}",
+                fix="kiểm tra maturin trong venv thử",
+            )
+
+        if proc.returncode != 0:
+            return Check(
+                "maturin_develop_works", False,
+                detail=(
+                    f"`{' '.join(cmd)}` thất bại (exit={proc.returncode}). "
+                    f"stdout: {(proc.stdout or '')[-500:]} | "
+                    f"stderr: {(proc.stderr or '')[-800:]}"
+                ),
+                fix=(
+                    "ĐỪNG chạy thực nghiệm khi mục này còn hỏng: mọi hotspot sẽ "
+                    "BUILD_FAILED y như pilot 2. Đọc stderr ở trên -- nếu là "
+                    "'unexpected argument' thì lệnh trong "
+                    "crate_builder.maturin_command() sai cờ."
+                ),
+                data={"cmd": cmd, "how": how,
+                      "stdout": (proc.stdout or "")[-2000:],
+                      "stderr": (proc.stderr or "")[-2000:]},
+            )
+
+        # 5. Chốt lại: module phải IMPORT ĐƯỢC từ venv đó. Build xong mà không
+        #    import được thì nó đã cài vào venv khác -- lỗi im lặng tệ hơn exit 2.
+        code, out = _run([str(py), "-c", f"import {ext}; print({ext}.__file__)"], 120)
+        if code != 0:
+            return Check(
+                "maturin_develop_works", False,
+                detail=(
+                    f"maturin develop báo thành công nhưng KHÔNG import được "
+                    f"`{ext}` từ venv thử: {out[-500:]}"
+                ),
+                fix=(
+                    "module đã được cài vào venv KHÁC. Kiểm tra cách chọn venv "
+                    f"đích ({how}) và biến VIRTUAL_ENV."
+                ),
+                data={"cmd": cmd, "how": how},
+            )
+
+        return Check(
+            "maturin_develop_works", True,
+            detail=(
+                f"`maturin develop` chạy được VÀ module import được từ venv đích "
+                f"({out.strip()[-90:]})"
+            ),
+            data={"cmd": cmd, "how": how, "pyo3_version": PYO3_VERSION},
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check_dataset(cfg: dict) -> list[Check]:
     """Dataset đúng cấu trúc, và đường dẫn KHÔNG trỏ vào `target_projects`."""
     root_str = str(((cfg.get("dataset") or {}).get("source_root")) or "").strip()
@@ -472,6 +647,10 @@ def run_all(cfg: dict, skip_llm: bool = False) -> list[Check]:
     # được không. Hỏng ở đây thì mọi hotspot sẽ COMPILE_FAILED, chạy tiếp là
     # đốt giờ GPU vô ích.
     checks.append(check_pyo3_example_compiles())
+    # TẦNG THỨ HAI, không thay thế được cho nhau: `cargo check` chỉ kiểm cú
+    # pháp/kiểu; `maturin develop` mới đóng gói và CÀI module. Pilot 2 cho
+    # cargo check 77% nhưng maturin 0% -- nên phải kiểm cả hai.
+    checks.append(check_maturin_develop_works())
     checks += check_dataset(cfg)
     checks.append(check_disk(cfg))
     checks.append(check_git_state())

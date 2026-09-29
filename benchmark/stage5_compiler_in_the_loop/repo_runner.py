@@ -279,6 +279,30 @@ def install_repo(
     if not ok:
         return False, f"không cài được pytest/cloudpickle: {err}"
 
+    # --- maturin VÀO CHÍNH venv này ---------------------------------------
+    # `maturin develop` cài extension vào venv mà nó coi là đang active. Cách
+    # chắc chắn nhất để chỉ đúng venv đích là chạy `python -m maturin` bằng
+    # interpreter của venv đó -- và điều đó đòi maturin phải nằm TRONG venv này,
+    # không phải trên PATH hệ thống.
+    #
+    # Ở pilot 2, venv repo chỉ có pytest + cloudpickle, nên maturin phải lấy từ
+    # ngoài và venv đích chỉ được chỉ ra bằng biến `VIRTUAL_ENV` -- mơ hồ, và
+    # nếu chỉ sai thì module được cài vào venv KHÁC rồi bước so khớp correctness
+    # lặng lẽ không import được. Cài vào đây để bỏ hẳn lớp mơ hồ đó.
+    #
+    # KHÔNG chặn nếu thất bại: `crate_builder.maturin_command()` tự lùi về
+    # `maturin` theo PATH, nên repo vẫn chạy được (chỉ kém chắc chắn hơn).
+    ok, err = _pip_install(py, ["maturin"], work_dir, timeout_sec)
+    if ok:
+        logger.info("Đã cài maturin vào venv của repo -- build Rust sẽ dùng "
+                    "`python -m maturin` của chính venv này.")
+    else:
+        logger.warning(
+            "Không cài được maturin vào venv của repo (%s). Build Rust sẽ lùi về "
+            "`maturin` trên PATH, và venv đích chỉ được xác định qua VIRTUAL_ENV "
+            "-- kém chắc chắn hơn.", (err.splitlines()[-1] if err else "?"),
+        )
+
     installed_something = False
     req = work_dir / "requirements.txt"
     if req.exists():

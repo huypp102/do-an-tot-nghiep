@@ -1,7 +1,9 @@
 # AUDIT — Output của pipeline có đủ để so sánh CORRECTNESS và EFFICIENCY chưa?
 
 **Phạm vi audit gốc:** chỉ đọc code + chạy thử với mock/dataset giả, không sửa file nào.
-**Cập nhật 2026-09-29 (4 vòng):** vòng 4 chuẩn bị PILOT 2 -- đưa sửa tay từ pilot 1 vào code, PSG đầy đủ theo POLO Table 1, Decision Gate 3 tầng độc lập, nhiễu nền cho ablation -- xem mục *CHUẨN BỊ CHO PILOT 2* ngay dưới.
+**Cập nhật 2026-09-29 (5 vòng):** vòng 5 -- PILOT 2 đã chạy: lỗi PyO3 HẾT (`cargo check` 0% -> 77%), nhưng lộ ra lỗi MỚI ở tầng `maturin develop` (100% thất bại) -- xem mục *PILOT 2* ngay dưới.
+
+**Cập nhật 2026-09-29 (vòng 4):** vòng 4 chuẩn bị PILOT 2 -- đưa sửa tay từ pilot 1 vào code, PSG đầy đủ theo POLO Table 1, Decision Gate 3 tầng độc lập, nhiễu nền cho ablation -- xem mục *CHUẨN BỊ CHO PILOT 2* ngay dưới.
 
 **Cập nhật 2026-09-29 (vòng 3):** vòng 3 sửa 3 vấn đề phát hiện từ LƯỢT CHẠY THỰC NGHIỆM ĐẦU TIÊN trên máy thuê (lệch API PyO3, nhãn trạng thái gộp, hàm test chiếm pool) -- xem mục *BA VẤN ĐỀ TỪ LƯỢT CHẠY THỰC NGHIỆM 1 ĐẦU TIÊN* ngay dưới, có trích nguyên văn lỗi `cargo check` thật.
 
@@ -26,6 +28,102 @@ File kết quả đã mở và đối chiếu: `results/pipeline_raw_*_repo_alph
 ---
 
 ---
+
+---
+
+---
+
+# PILOT 2: LỖI PyO3 ĐÃ HẾT, NHƯNG LỘ RA LỖI Ở TẦNG `maturin develop` (2026-09-29)
+
+## Bản sửa PyO3 có hiệu lực — đo được
+
+| | pilot 1 | pilot 2 |
+|---|---|---|
+| `cargo check` biên dịch được | **0/31 (0%)** | **42/54 (77%)** |
+| nguyên nhân pilot 1 | prompt dạy API PyO3 cũ (`&PyList`, `&PyModule`) | — |
+
+Bản sửa prompt (khối `PYO3_API_RULES` + `PYO3_EXAMPLE`, hằng `PYO3_API_VERSION`, và test chặn lệch phiên bản) **đã giải quyết dứt điểm** lỗi gốc của pilot 1. Đây là bằng chứng đo được, không phải phỏng đoán.
+
+## Nhưng `maturin develop` thất bại 100%
+
+`0/42` crate qua được `cargo check` cài được thành module Python. Cùng một lỗi, ở **cả 3 nhánh ablation**, trên **cả 5 repo**.
+
+### Vì sao `cargo check` xanh không nói gì về việc này
+
+Hai công cụ kiểm **hai việc khác nhau ở hai tầng khác nhau**:
+
+| | `cargo check` | `maturin develop` |
+|---|---|---|
+| Kiểm gì | cú pháp, kiểu, borrow-checker | build `.so`/`.pyd`, đóng gói thành package Python, **cài vào venv** |
+| Sinh artifact | không | có |
+| `import` được từ Python | không liên quan | đây mới là đích |
+
+Một crate hoàn toàn đúng về Rust vẫn có thể không bao giờ thành module dùng được. Đó chính là chỗ pilot 2 vỡ, và `cargo check` 77% không hề cảnh báo.
+
+### Nguyên nhân — xác định từ log thật, không phỏng đoán
+
+Đọc `stages.phase_d.<hotspot>.output` trong `repos/*.json` của pilot 2:
+
+```
+error: unexpected argument '--interpreter' found
+
+  tip: to pass '--interpreter' as a value, use '-- --interpreter'
+
+Usage: maturin develop --release [ARGS]...
+
+For more information, try '--help'.
+```
+
+`maturin develop` **không có** cờ `--interpreter` — chỉ `maturin build` mới có. Truyền vào thì clap báo lỗi dùng sai và thoát **exit 2 trước khi build một dòng nào**. Đối chiếu toàn bộ 54 lượt build của pilot 2:
+
+```
+42x  BUILD_FAILED: --interpreter không hợp lệ
+12x  BUILD_FAILED: không có code Rust (Stage 4 không sinh được)
+ 0x  BUILT_OK
+```
+
+Một nguyên nhân duy nhất, giải thích 42/42. Không có nguyên nhân thứ hai cần đoán.
+
+### Trả lời (a)–(d) trước khi sửa
+
+**(a)** `maturin` được gọi bằng **tên trần** qua PATH (`cmd = ["maturin", "develop", ...]`), với `PATH` = `.rtb_venv/bin` trước rồi tới PATH hệ thống. Vì `.rtb_venv` không có maturin, nó rơi xuống bản ngoài venv repo.
+
+**(b)** `cwd` = thư mục crate — **đúng**. Venv đích được chỉ bằng `VIRTUAL_ENV` (đúng cơ chế) **và** `--interpreter` (sai — cờ không tồn tại). Nên `--interpreter` là lỗi, không phải `VIRTUAL_ENV`.
+
+**(c)** `.rtb_venv` **không** có maturin — `install_repo` chỉ cài `pytest`, `cloudpickle`, phụ thuộc repo. Nghĩa là venv đích chỉ được xác định qua một biến môi trường, không có lớp thứ hai.
+
+**(d)** stdout/stderr **có** được `capture_output` và **có** lưu vào `result.output` → ra tới JSON (đó là cách đọc được lỗi trên). Nhưng **dòng log chỉ in `exit=%d`**, nên ai đọc `pilot.log` không thấy gì. Toàn bộ chẩn đoán nằm im trong JSON mà không ai tới đọc — đó là lý do vấn đề trông như "không đủ dữ liệu để chẩn đoán".
+
+## Ba bản sửa
+
+**BƯỚC 2 — quan sát được (ưu tiên cao nhất, rủi ro thấp nhất).** Thêm vào `CrateResult`: `maturin_cmd`, `maturin_returncode`, `maturin_stdout`, `maturin_stderr`, `maturin_error`. `maturin_error` giữ **nguyên văn, không cắt** (đây là log cho người debug, không phải prompt gửi LLM) và mang theo cả lệnh, `cwd`, cách chọn venv để tái lập được. Dòng log khi thất bại giờ **in cả stdout và stderr**. `output` vẫn cắt 2000 ký tự cho đường gửi LLM — hai mục đích khác nhau, hai giới hạn khác nhau.
+
+**BƯỚC 3a — bỏ `--interpreter`.** Sửa có cơ sở trực tiếp từ thông báo lỗi.
+
+**BƯỚC 3b — bỏ hẳn lớp mơ hồ về venv đích.** Cài `maturin` vào **mọi** `.rtb_venv` (`install_repo`), và gọi `python -m maturin develop --release` **bằng chính interpreter của venv đó** (`maturin_command()`). Dựa vào `VIRTUAL_ENV` một mình là mơ hồ: nếu chỉ sai venv thì module được cài vào chỗ khác, `maturin` báo thành công, rồi bước so khớp correctness **lặng lẽ không import được** — một lỗi khó truy hơn nhiều so với exit 2. Vẫn lùi về `maturin` trên PATH nếu venv repo không cài được, và ghi rõ trong log rằng đường đó kém chắc chắn hơn.
+
+`toolchain_available()` nay nhận `venv_python` tuỳ chọn: maturin được coi là có khi nó nằm **trong venv repo** hoặc trên PATH.
+
+## Phép kiểm mới trong preflight — để lớp này không vỡ lần nữa
+
+`preflight.check_maturin_develop_works()` chạy **trọn đường** trên chính khuôn mẫu trong prompt: tạo venv dùng một lần → cài maturin vào venv đó → dựng crate từ `PYO3_EXAMPLE` → chạy **đúng lệnh** mà `crate_builder.maturin_command()` sinh ra → **`import` module vừa cài**. Chỉ khi import được mới coi là đạt.
+
+Tách riêng khỏi `pyo3_example_compiles` có chủ ý: pilot 2 chứng minh hai tầng này hỏng độc lập nhau (77% vs 0%), nên gộp thành một phép kiểm là bỏ mất đúng thứ đã vỡ. Bước cuối (`import`) là chốt quan trọng nhất — nó bắt được cả trường hợp maturin báo thành công nhưng cài vào venv sai.
+
+## Một lỗi tôi tự gây ra và test bắt được
+
+Khi thay `build_crate`, tôi làm mất dòng `return result` ở nhánh **thành công**. Bản trong git có nó; bản tôi viết lại thiếu. Hệ quả nếu để lọt: `build_all` nhận `None`, rồi `crate.ok` ném `AttributeError`.
+
+Lỗi này **không thể lộ ra ở pilot 2** vì mọi build đều thất bại, và các nhánh thất bại đều có `return`. Nó chỉ nổ ra ở lần build **thành công đầu tiên** — tức đúng lúc bản sửa maturin bắt đầu có tác dụng. `tests/test_maturin_develop.py` mục (5) bắt được nó trên máy dev.
+
+## Chỉ xác nhận được trên máy thuê
+
+**BẮT BUỘC trước pilot 3: cả hai mục preflight phải PASS** — `pyo3_example_compiles` (cú pháp/kiểu) **và** `maturin_develop_works` (đóng gói + cài + import). Máy dev không có cargo/maturin nên cả hai đang ở trạng thái "bỏ qua, không bắt buộc".
+
+23. **`maturin develop` không cờ `--interpreter` có chạy được thật hay không.** Bản sửa dựa trên thông báo lỗi của chính maturin, nhưng **chưa chạy thật lần nào**. Nếu còn lỗi khác ở tầng này, `maturin_error` giờ đã đủ để chẩn đoán ngay từ `pilot.log`.
+24. **`python -m maturin` từ venv repo có cài đúng vào venv đó hay không.** Đây là điểm mà bước `import` của preflight kiểm; chưa có dữ liệu thật.
+25. **Cài `maturin` vào mỗi `.rtb_venv` tốn thêm bao lâu.** Với 5 repo × 3 nhánh, thời gian cài thêm chưa đo được; `max_wall_hours=6` có thể cần xem lại.
+26. **Có bản `maturin` nào cần `--uv` hay không** khi venv được tạo bằng `uv venv`. Chưa gặp, nhưng nếu gặp thì lỗi sẽ hiện nguyên văn trong `maturin_error`.
 
 ---
 
