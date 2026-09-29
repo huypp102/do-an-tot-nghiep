@@ -112,6 +112,120 @@ def evaluate_candidate(row: dict, min_replayable: int) -> tuple[bool, str]:
     return True, f"{n_replayable} hotspot phát lại được"
 
 
+# Tỉ lệ đạt ĐO ĐƯỢC ở pilot 1 (run_20260928_150827, 40 ứng viên đầu theo thứ
+# tự tên trên dataset 171 repo). Dùng làm căn cứ cảnh báo, KHÔNG phải phỏng đoán.
+#
+#   trong 25 ứng viên đầu:  6 đạt (24%)
+#   trong 30 ứng viên đầu:  9 đạt (30%)
+#   trong 40 ứng viên đầu: 12 đạt (30%)
+#
+# Lý do bị loại: 16 BASELINE_FAILED, 9 không đủ hotspot phát lại được,
+# 3 INSTALL_FAILED.
+PILOT1_PASS_AT = {10: 3, 15: 4, 20: 4, 25: 6, 30: 9, 40: 12}
+PILOT1_TOTAL_SCREENED = 40
+
+
+def estimate_pass_count(limit: int) -> tuple[int, str]:
+    """Số repo dự kiến qua sàng trong `limit` ứng viên đầu, theo số liệu pilot 1.
+
+    Dùng mốc đo được gần nhất KHÔNG vượt `limit`; ngoài phạm vi đã đo thì suy
+    theo tỉ lệ 30% của toàn bộ 40 ứng viên. Nói rõ cách suy ra để người đọc
+    biết con số nào là đo và con số nào là ngoại suy.
+    """
+    exact = PILOT1_PASS_AT.get(limit)
+    if exact is not None:
+        return exact, f"đo được ở pilot 1: {exact}/{limit} ứng viên đầu qua sàng"
+
+    known = [k for k in sorted(PILOT1_PASS_AT) if k <= limit]
+    if known:
+        base = known[-1]
+        return PILOT1_PASS_AT[base], (
+            f"mốc đo gần nhất ở pilot 1: {PILOT1_PASS_AT[base]}/{base} ứng viên đầu "
+            f"qua sàng (chưa đo riêng cho {limit})"
+        )
+    rate = PILOT1_PASS_AT[PILOT1_TOTAL_SCREENED] / PILOT1_TOTAL_SCREENED
+    return int(limit * rate), f"ngoại suy theo tỉ lệ {rate:.0%} của pilot 1"
+
+
+def warn_if_screening_too_small(limit: int, n_repos: int, n_backup: int) -> list[str]:
+    """Cảnh báo về cỡ mẫu, BA mức tuỳ quan hệ giữa "cần" và "ước lượng đạt".
+
+    Ba mức, vì gộp chúng lại thì thông điệp sai với thực tế:
+      * đạt > cần   -> ĐỦ, có dư. Một dòng thông báo là xong.
+      * đạt == cần  -> SÁT NGƯỠNG. Về lý thuyết vừa đủ, nhưng KHÔNG dư sai số:
+                       một repo đạt mà hỏng môi trường ở lượt chính là hết dự
+                       phòng. Nói "có thể không đủ" ở đây là sai (lý thuyết là
+                       đủ); nói "đủ" mà im lặng cũng sai (không có biên an toàn).
+      * đạt < cần   -> CÓ THỂ KHÔNG ĐỦ.
+
+    CỐ Ý KHÔNG tự tăng `screening_limit`: quy mô là quyết định của người chạy,
+    và tự nới nó sau khi đã chốt là thay đổi mẫu mà không ai biết.
+    """
+    need = n_repos + n_backup
+    expected, how = estimate_pass_count(limit)
+    lines: list[str] = []
+
+    if expected > need:
+        lines.append(
+            f"  Ước lượng: ~{expected} repo qua sàng trong {limit} ứng viên "
+            f"({how}) -- đủ cho {n_repos} + {n_backup} dự phòng, dư "
+            f"{expected - need} repo."
+        )
+        for line in lines:
+            print(line)
+        return lines
+
+    if expected == need:
+        lines += [
+            "",
+            "  " + "-" * 72,
+            f"  CẢNH BÁO CỠ MẪU: SÁT NGƯỠNG, không dư ứng viên nào để loại thêm "
+            f"nếu có repo INSTALL_FAILED mới xuất hiện.",
+            f"    cần            : {n_repos} repo + {n_backup} dự phòng = {need}",
+            f"    ước lượng đạt  : ~{expected} repo  ({how})",
+            "",
+            "  Về lý thuyết VỪA ĐỦ, nhưng không có biên an toàn: dự phòng chỉ bù",
+            f"  được {n_backup} repo hỏng môi trường. Từ repo INSTALL_FAILED thứ "
+            f"{n_backup + 1}",
+            f"  trở đi sẽ không còn gì để thay, và pilot chạy với ít hơn {n_repos} repo.",
+            "  Đó là hành vi ĐÚNG (chạy với số tìm được, ghi rõ trong metadata),",
+            "  KHÔNG phải lỗi -- pipeline không tự hạ quy tắc và không báo lỗi im lặng.",
+            "",
+            "  Ước lượng dựa trên pilot 1, nơi 3/40 repo bị INSTALL_FAILED. Hai bản",
+            "  sửa ở lượt trước có thể nâng tỉ lệ đạt (pilot 1 chạy khi chưa có chúng):",
+            "    - cài thêm requirements-dev/test-requirements  -> cứu bớt BASELINE_FAILED",
+            "    - lọc hàm test khỏi candidate_pool             -> cứu bớt 'ít hotspot'",
+            "  " + "-" * 72,
+            "",
+        ]
+        for line in lines:
+            print(line)
+        return lines
+
+    lines += [
+        "",
+        "  " + "!" * 72,
+        f"  CẢNH BÁO CỠ MẪU: screening_limit={limit} có thể KHÔNG đủ.",
+        f"    cần            : {n_repos} repo + {n_backup} dự phòng = {need}",
+        f"    ước lượng đạt  : ~{expected} repo  ({how})",
+        "    lý do loại ở pilot 1: 16 BASELINE_FAILED, 9 không đủ hotspot phát",
+        "                          lại được, 3 INSTALL_FAILED",
+        "",
+        "  KHÔNG tự tăng screening_limit -- quy mô là quyết định của người chạy.",
+        "  Hai bản sửa ở lượt trước CÓ THỂ nâng tỉ lệ đạt (pilot 1 chạy khi chưa",
+        "  có chúng):",
+        "    - cài thêm requirements-dev/test-requirements  -> cứu bớt BASELINE_FAILED",
+        "    - lọc hàm test khỏi candidate_pool             -> cứu bớt 'ít hotspot'",
+        "  Nếu sau khi sàng thật mà không đủ, pipeline vẫn CHẠY TIẾP với số repo",
+        "  tìm được và ghi rõ trong metadata -- không tự nới quy tắc.",
+        "  " + "!" * 72,
+        "",
+    ]
+    for line in lines:
+        print(line)
+    return lines
+
+
 def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = False) -> dict:
     """Sàng rồi chọn mẫu. Trả về dict đủ để ghi vào metadata."""
     from input.intake import IntakeError, resolve_dataset_repos
@@ -133,7 +247,11 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
     _banner(f"SÀNG LỌC -- {len(candidates)}/{len(all_repos)} repo ứng viên (chỉ Pha A-B)")
     print(f"  quy tắc: {SELECTION_RULE}")
     print(f"  cần {n_repos} repo + {n_backup} dự phòng, mỗi repo >= {min_replayable} "
-          f"hotspot phát lại được\n")
+          f"hotspot phát lại được")
+    # Cảnh báo CÓ CĂN CỨ từ số liệu pilot 1. In ở cả `--dry-run` và lượt chạy
+    # thật -- biết trước khi tốn giờ GPU mới có ích.
+    warn_lines = warn_if_screening_too_small(limit, n_repos, n_backup)
+    print()
 
     if dry_run:
         print("  --dry-run: KHÔNG sàng thật. Danh sách ứng viên theo thứ tự tên:")
@@ -142,6 +260,11 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
         return {
             "rule": SELECTION_RULE, "dry_run": True,
             "n_dataset_repos": len(all_repos),
+            "screening_limit": limit,
+            "n_repos": n_repos,
+            "n_backup_repos": n_backup,
+            "min_replayable_hotspots": min_replayable,
+            "sample_size_warning": warn_lines,
             "candidates": [r.name for r in candidates],
             "selected": [], "backups": [], "rejected": {},
         }
@@ -190,6 +313,9 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
         "screening_limit": limit,
         "min_replayable_hotspots": min_replayable,
         "n_screened": len(screened),
+        "n_repos": n_repos,
+        "n_backup_repos": n_backup,
+        "sample_size_warning": warn_lines,
         "candidates": [r.name for r in candidates],
         "screened": screened,
         "selected": [r.name for r in selected],
@@ -219,6 +345,10 @@ def run_main_phase(
 
     queue = [Path(p) for p in selection.get("_selected_paths", [])]
     backups = [Path(p) for p in selection.get("_backup_paths", [])]
+    # Giữ số ban đầu để báo cáo được "đã dùng hết bao nhiêu dự phòng".
+    n_repos_configured = len(queue)
+    n_backup_total = len(backups)
+    exhausted_backups: list[str] = []
     timestamp = run_id
 
     rows: list[dict] = []
@@ -280,11 +410,34 @@ def run_main_phase(
         # thay nó đi là chọn mẫu theo kết quả.
         import outcomes
 
-        if row.get("repo_status") == outcomes.INSTALL_FAILED and backups:
-            sub = backups.pop(0)
-            queue.append(sub)
-            print(f"  {repo.name} bị INSTALL_FAILED -> thay bằng repo dự phòng "
-                  f"'{sub.name}' (lỗi môi trường, không phải đặc điểm repo).")
+        if row.get("repo_status") == outcomes.INSTALL_FAILED:
+            if backups:
+                sub = backups.pop(0)
+                queue.append(sub)
+                print(f"  {repo.name} bị INSTALL_FAILED -> thay bằng repo dự phòng "
+                      f"'{sub.name}' (lỗi môi trường, không phải đặc điểm repo). "
+                      f"Còn {len(backups)} dự phòng.")
+            else:
+                # HẾT DỰ PHÒNG. Nói rõ ngay tại chỗ: đây là lúc cỡ mẫu thật tụt
+                # xuống dưới `n_repos`, và nếu im lặng thì bảng kết quả cuối sẽ
+                # có ít repo hơn dự tính mà không ai biết vì sao.
+                # KHÔNG crash, KHÔNG tự hạ quy tắc -- chạy tiếp với số tìm được.
+                logger.error(
+                    "Repo '%s' bị INSTALL_FAILED nhưng ĐÃ HẾT repo dự phòng "
+                    "(n_backup_repos=%d đã dùng hết). Cỡ mẫu thật sẽ NHỎ HƠN "
+                    "n_repos đã cấu hình. Pipeline chạy tiếp với số repo tìm "
+                    "được -- xem `selection.json` và `metadata.json` để biết "
+                    "chính xác đã chạy trên mấy repo.",
+                    repo.name, n_backup_total,
+                )
+                exhausted_backups.append(repo.name)
+
+    if exhausted_backups:
+        print()
+        print(f"  HẾT DỰ PHÒNG: {len(exhausted_backups)} repo bị INSTALL_FAILED mà "
+              f"không còn repo nào để thay: {exhausted_backups}")
+        print(f"  Cỡ mẫu thật = {len(rows)} repo đã chạy (n_repos cấu hình = "
+              f"{n_repos_configured}, n_backup_repos = {n_backup_total}).")
 
     return rows, stopped_early
 

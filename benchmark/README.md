@@ -256,7 +256,9 @@ File cần đọc trong `results/<run_id>/`:
 
 ### Thiên lệch chọn mẫu — phải nêu trong luận văn
 
-12 repo **không phải mẫu ngẫu nhiên** từ 171 repo. Chúng là những repo đầu tiên theo thứ tự tên mà bộ test gốc chạy được **và** có ≥ 2 hotspot ghi/phát lại được đối số. Quy tắc này được chốt **trước** khi xem kết quả và ghi nguyên văn vào `metadata.json` cùng lý do loại từng repo.
+5 repo **không phải mẫu ngẫu nhiên** từ 171 repo. Chúng là những repo đầu tiên theo thứ tự tên (sàng tối đa **25** ứng viên) mà bộ test gốc chạy được **và** có ≥ 2 hotspot ghi/phát lại được đối số, cộng **1** repo dự phòng. Quy tắc này được chốt **trước** khi xem kết quả và ghi nguyên văn vào `metadata.json` cùng lý do loại từng repo.
+
+**Vì sao 5+1 chứ không phải 10+2:** quy mô được chọn theo **tỉ lệ đạt thật đã đo**, không theo mong muốn. Ở pilot 1, trong 25 ứng viên đầu chỉ có **6 repo qua sàng** (24%) — 16 repo `BASELINE_FAILED`, 9 repo không đủ hotspot phát lại được, 3 repo `INSTALL_FAILED`. Đặt 10+2 (cần 12) thì chắc chắn thiếu: vừa tốn thời gian sàng hết 25 repo, vừa kết thúc với mẫu nhỏ hơn dự tính mà không ai lường trước. 5+1 (cần 6) khớp đúng con số đo được — nhưng là **sát ngưỡng**, không có biên an toàn, nên `--dry-run` in cảnh báo riêng cho tình huống này.
 
 Lý do phải sàng: đo thật trên `piskvorky_sqlitedict` cho thấy **5/5 hotspot hạng cao bị loại** — 3 trong đó là method của đối tượng giữ `_contextvars.Context` nên không pickle được. Lấy thẳng top-5 thì thường còn 0 hotspot để dịch, và ablation không có gì để so.
 
@@ -266,7 +268,7 @@ Lý do phải sàng: đo thật trên `piskvorky_sqlitedict` cho thấy **5/5 ho
 |---|---|---|
 | LLM | tắt | `local`, 2 agent |
 | `num_ctx` | mặc định | 16384 / 8192 (VRAM cho 2 model) |
-| dataset | `data/fake_dataset` | thật, 12 repo |
+| dataset | `data/fake_dataset` | thật, 5 repo (+1 dự phòng, sàng 25 ứng viên) |
 | ablation | tắt | bật, 2 nhánh |
 | `build_mode` | `static` | `dynamic` (POLO Eq.1-2) |
 | ngân sách | 1h | 6h |
@@ -653,7 +655,7 @@ Quyết định cuối: `SELECT` / `REVIEW` / `KEEP_PYTHON` / `REJECT_BLOCKED`. 
 
 ## Nhiễu nền của ablation
 
-`ablation.noise_floor: true` chạy thêm một lượt sinh **độc lập thứ hai của chính nhánh `graph`** (cùng prompt từng ký tự, chỉ khác seed), tối đa `noise_floor_max_hotspots` hotspot. Baseline và bước ghi đối số **không** chạy lại.
+`ablation.noise_floor: true` chạy thêm một lượt sinh **độc lập thứ hai của chính nhánh `graph`** (cùng prompt từng ký tự, chỉ khác seed), tối đa `noise_floor_max_hotspots` hotspot (**5** ở `pilot_linux`). Baseline và bước ghi đối số **không** chạy lại.
 
 Vì sao bắt buộc phải có trước khi kết luận: nếu graph-vs-none bất đồng ở 3 hotspot mà graph-vs-graph cũng bất đồng ở 3, thì con số đầu không nói gì về context — nó chỉ nói LLM trả lời khác nhau giữa hai lần gọi. Báo cáo đặt hai con số cạnh nhau và tự gắn `KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU` khi hiệu ứng không vượt nhiễu.
 

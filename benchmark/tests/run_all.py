@@ -30,6 +30,7 @@ GROUPS: dict[str, str] = {
     "test_pyo3_prompt_matches_version.py": "fast",
     "test_run1_fixes.py": "fast",
     "test_pilot2_prep.py": "fast",
+    "test_pilot_scale.py": "fast",
     "test_gen.py": "fast",
     "test_numctx_think.py": "fast",
     "test_libsafety.py": "fast",

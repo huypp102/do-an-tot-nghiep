@@ -43,7 +43,15 @@ ablation:
   # BẬT nhiễu nền ở pilot: không có nó thì không được phép kết luận gì về tác
   # động của context, và cả lượt chạy sẽ chỉ cho ra những con số không đọc được.
   noise_floor: true
-  noise_floor_max_hotspots: 10
+  # GIẢM 10 -> 5 để pilot 2 chạy nhanh hơn. Mỗi hotspot ở nhánh nhiễu nền là
+  # một lời gọi LLM nữa, nên đây là chỗ cắt thời gian rẻ nhất.
+  #
+  # LƯU Ý VỀ TÊN KHOÁ: dùng khoá PHẲNG `noise_floor_max_hotspots`, không phải
+  # dạng lồng `noise_floor: {max_hotspots: 5}`. Lý do: `noise_floor` đang là cờ
+  # bật/tắt kiểu bool mà `ablation.noise_floor_enabled()` đọc; biến nó thành
+  # dict sẽ khiến `noise_floor_max_hotspots` không còn được đọc và âm thầm rơi
+  # về mặc định 10 -- đúng kiểu lỗi "config bị nơi khác đè" cần tránh.
+  noise_floor_max_hotspots: 5
 
 repo_oracle:
   enabled: true
@@ -58,8 +66,29 @@ experiment:
   # dở dang chứ không mất trắng -- giờ GPU tính tiền theo giờ.
   max_wall_hours: 6
   # Số repo ứng viên đem đi sàng (chỉ Pha A-B, không LLM/Rust) trước khi chọn.
-  screening_limit: 40
+  #
+  # 25 ứng viên, và quy mô mẫu được CHỌN THEO TỈ LỆ ĐẠT THẬT ĐÃ ĐO, không phải
+  # theo mong muốn. Số liệu từ pilot 1 (`run_20260928_150827`, dataset 171 repo,
+  # thứ tự tên):
+  #
+  #     trong 10 ứng viên đầu:  3 đạt (30%)
+  #     trong 25 ứng viên đầu:  6 đạt (24%)   <-- quy mô hiện tại
+  #     trong 40 ứng viên đầu: 12 đạt (30%)   <-- pilot 1
+  #
+  # Lý do bị loại: 16 BASELINE_FAILED, 9 không đủ hotspot phát lại được,
+  # 3 INSTALL_FAILED.
+  #
+  # VÌ SAO 5+1 CHỨ KHÔNG PHẢI 10+2: với 25 ứng viên, số repo đạt đo được là 6.
+  # Đặt 10+2 (cần 12) thì chắc chắn thiếu -- vừa tốn thời gian sàng hết 25 repo
+  # vừa không đủ số, và lượt chạy kết thúc với mẫu nhỏ hơn dự tính mà không ai
+  # dự đoán trước. 5+1 (cần 6) khớp đúng con số đo được.
+  screening_limit: 25
   # Quy tắc chọn repo, CỐ ĐỊNH trước khi xem kết quả (xem run_experiment1.py).
   min_replayable_hotspots: 2
-  n_repos: 12
-  n_backup_repos: 3
+  # SÁT NGƯỠNG: cần 6, ước lượng đạt 6 -> vừa đủ, KHÔNG dư. Một repo đạt mà bị
+  # INSTALL_FAILED ở lượt chính thì repo dự phòng duy nhất bù được; từ repo thứ
+  # hai trở đi thì không còn gì để thay, và pilot sẽ chạy với ít hơn 5 repo.
+  # Đó là hành vi ĐÚNG (chạy với số tìm được, ghi rõ trong metadata), không
+  # phải lỗi -- xem `run_main_phase` và tests/test_pilot_scale.py.
+  n_repos: 5
+  n_backup_repos: 1
