@@ -40,6 +40,10 @@ ablation:
   repeats: 1
   seed: 1234
   temperature: 0.2
+  # BẬT nhiễu nền ở pilot: không có nó thì không được phép kết luận gì về tác
+  # động của context, và cả lượt chạy sẽ chỉ cho ra những con số không đọc được.
+  noise_floor: true
+  noise_floor_max_hotspots: 10
 
 repo_oracle:
   enabled: true

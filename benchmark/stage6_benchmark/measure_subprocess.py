@@ -57,7 +57,8 @@ def measure_in_subprocess(
         ]
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec
             )
         except subprocess.TimeoutExpired:
             return None, f"đo trong subprocess quá {timeout_sec}s -> huỷ"
@@ -151,7 +152,8 @@ def measure_pair_in_repo_venv(
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout_sec, cwd=str(work_dir), env=env,
+            errors="replace", stdin=subprocess.DEVNULL,
+            timeout=timeout_sec, cwd=str(work_dir), env=env,
         )
     except subprocess.TimeoutExpired:
         return {}, f"đo ghép cặp quá {timeout_sec}s -> huỷ"

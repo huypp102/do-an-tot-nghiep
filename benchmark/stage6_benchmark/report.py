@@ -392,8 +392,12 @@ def build_repo_table(repo_rows: list[dict]) -> str:
     lines.append("")
     lines.append(
         "status: OK=mọi hotspot đo được | PARTIAL=một phần | "
-        "NO_MEASURABLE_HOTSPOT=không đo được gì | BASELINE_FAILED=bộ test gốc đã "
-        "fail sẵn (repo bị LOẠI khỏi so sánh) | INSTALL_FAILED | TIMEOUT."
+        "NO_MEASURABLE_HOTSPOT=rụng TRƯỚC bước sinh code (không phát lại được "
+        "đối số / ngoài tầng hỗ trợ / bị gate gạt) | "
+        "ALL_HOTSPOTS_FAILED_COMPILE=đã sinh được code Rust nhưng KHÔNG cái nào "
+        "biên dịch được (vấn đề của prompt/model, không phải của khâu chọn "
+        "hotspot) | BASELINE_FAILED=bộ test gốc đã fail sẵn (repo bị LOẠI khỏi "
+        "so sánh) | INSTALL_FAILED | TIMEOUT."
     )
     lines.append(
         "reg_free (REGRESSION_FREE): tập test pass của hybrid CHỨA TOÀN BỘ tập "

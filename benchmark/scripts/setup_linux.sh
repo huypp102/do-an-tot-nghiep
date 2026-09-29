@@ -96,7 +96,9 @@ else
   ZIP="$RTB_DATA_DIR/dataset.zip"
   if [ ! -s "$ZIP" ]; then
     info "tải dataset bằng gdown"
-    "$VENV_DIR/bin/gdown" --id "$DATASET_DRIVE_ID" -O "$ZIP"
+    # gdown bo tuy chon `--id` o cac ban moi -- truyen thang id la dung.
+    # Da sua tay va xac nhan chay duoc tren may thue o pilot 1.
+    "$VENV_DIR/bin/gdown" "$DATASET_DRIVE_ID" -O "$ZIP"
   else
     info "đã có $ZIP -- bỏ qua bước tải"
   fi

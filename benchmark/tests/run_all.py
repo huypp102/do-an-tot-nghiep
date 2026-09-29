@@ -27,6 +27,9 @@ BENCH = TESTS_DIR.parent
 # "dataset" : CẦN dataset RepoTransBench thật (REPOTRANSBENCH_ROOT).
 GROUPS: dict[str, str] = {
     "test_portability.py": "fast",
+    "test_pyo3_prompt_matches_version.py": "fast",
+    "test_run1_fixes.py": "fast",
+    "test_pilot2_prep.py": "fast",
     "test_gen.py": "fast",
     "test_numctx_think.py": "fast",
     "test_libsafety.py": "fast",
@@ -45,6 +48,7 @@ GROUPS: dict[str, str] = {
     "test_ablation.py": "venv",
     "test_confounded.py": "venv",
     "test_resume_budget.py": "venv",
+    "test_all_failed_compile.py": "venv",
     "test_real_dataset_ab.py": "dataset",
 }
 

@@ -62,6 +62,70 @@ def _node_brief(fn, edge=None) -> dict[str, Any]:
     return brief
 
 
+def _class_detail_from_psg(graph, hotspot) -> dict[str, Any] | None:
+    """Context class lấy từ PSG ĐẦY ĐỦ (stage0_graph/psg.py). None nếu hotspot
+    không phải method, hoặc PSG đầy đủ không dựng được.
+
+    Trả về: tên class, lớp cha, và các method KHÁC cùng class -- tách riêng
+    những method mà hotspot GỌI và những method GỌI hotspot, vì hai quan hệ đó
+    nói hai điều khác nhau về việc có tách hàm ra được hay không.
+    """
+    classes = getattr(graph, "classes", None) or {}
+    ownership = getattr(graph, "ownership_edges", None) or []
+    if not classes or not ownership:
+        return None
+
+    owner_id = next(
+        (e.dst for e in ownership if e.kind == "ismember" and e.src == hotspot.id), None
+    )
+    if owner_id is None:
+        return None
+    cls = classes.get(owner_id)
+    if cls is None:
+        return None
+
+    # Lớp cha: kèm cờ resolved để người đọc biết cha có trong scope hay không.
+    bases: list[dict[str, Any]] = []
+    for edge in getattr(graph, "inheritance_edges", None) or []:
+        if edge.kind != "subclassOf" or edge.src != owner_id:
+            continue
+        if edge.resolved:
+            parent = classes.get(edge.dst)
+            bases.append({
+                "name": parent.qualified_name if parent else edge.dst,
+                "in_scope": True,
+                "methods": list(parent.method_names) if parent else [],
+            })
+        else:
+            bases.append({"name": edge.dst, "in_scope": False, "methods": []})
+
+    sibling_ids = [m for m in cls.method_ids if m != hotspot.id]
+    calls_out, called_by = [], []
+    for edge in graph.call_edges:
+        if edge.caller == hotspot.id and edge.callee in sibling_ids:
+            fn = graph.functions.get(edge.callee)
+            if fn is not None:
+                calls_out.append(fn.name)
+        elif edge.callee == hotspot.id and edge.caller in sibling_ids:
+            fn = graph.functions.get(edge.caller)
+            if fn is not None:
+                called_by.append(fn.name)
+
+    return {
+        "class_name": cls.qualified_name,
+        "class_file": cls.file,
+        "class_lineno": cls.lineno_start,
+        "bases": bases,
+        "n_methods": len(cls.method_ids),
+        "sibling_methods": [
+            graph.functions[m].name for m in sibling_ids if m in graph.functions
+        ],
+        "hotspot_calls_siblings": sorted(set(calls_out)),
+        "siblings_call_hotspot": sorted(set(called_by)),
+        "docstring_first_line": cls.docstring_first_line,
+    }
+
+
 def _find_hotspot_nodes(graph, function_name: str) -> list:
     """Mọi FunctionNode có tên trần khớp `function_name` (có thể >1 nếu trùng
     tên ở nhiều file -- giữ hết, không đoán bừa; xem giới hạn 'khớp theo tên'
@@ -118,6 +182,14 @@ def package_context_for(
         if "." in hotspot.qualified_name:
             class_context = hotspot.qualified_name.rsplit(".", 1)[0]
 
+        # --- PHA 3.3: context class LẤY TỪ PSG ĐẦY ĐỦ ---------------------
+        # `class_context` ở trên chỉ là một chuỗi tên suy từ qualified_name.
+        # PSG đầy đủ (stage0_graph/psg.py) cho biết thêm: lớp cha, và các method
+        # KHÁC cùng class mà hotspot gọi / bị gọi bởi. Với hotspot là method,
+        # đó là thông tin quan trọng hơn cả quan hệ import giữa các file --
+        # Generator Agent cần nó để viết shim Tầng 2 đúng.
+        class_detail = _class_detail_from_psg(graph, hotspot)
+
         # Quan hệ PSG ở mức file (POLO Fig.5 phần 3-4, đơn giản hoá cho Python).
         file_node = graph.files.get(hotspot.file)
         imports_this_file = [b for a, b in graph.import_edges if a == hotspot.file]
@@ -138,6 +210,7 @@ def package_context_for(
             "callers": callers,
             "callees": callees,
             "class_context": class_context,
+            "class_detail": class_detail,
             "file_context": {
                 "path": hotspot.file,
                 "imports_raw": list(file_node.imports_raw) if file_node else [],
@@ -210,7 +283,31 @@ def format_context_for_prompt(context: dict[str, Any]) -> str:
         header = f"### Vị trí {idx}: {hs['file']}:{hs['lineno_start']}-{hs['lineno_end']}"
         parts.append(header)
 
-        if occ.get("class_context"):
+        cd = occ.get("class_detail")
+        if cd:
+            # PSG ĐẦY ĐỦ: class + lớp cha + method cùng class (POLO Table 1).
+            lines = [f"Hotspot là method của class `{cd['class_name']}` "
+                     f"({cd['n_methods']} method, {cd['class_file']}:{cd['class_lineno']})"]
+            if cd.get("docstring_first_line"):
+                lines.append(f"  docstring class: {cd['docstring_first_line']}")
+            for b in cd.get("bases") or []:
+                scope = "trong scope" if b["in_scope"] else "NGOÀI scope"
+                extra = f", method: {', '.join(b['methods'][:8])}" if b["methods"] else ""
+                lines.append(f"  kế thừa `{b['name']}` ({scope}{extra})")
+            if cd.get("hotspot_calls_siblings"):
+                lines.append("  hotspot GỌI method cùng class: "
+                             + ", ".join(cd["hotspot_calls_siblings"]))
+            if cd.get("siblings_call_hotspot"):
+                lines.append("  method cùng class GỌI hotspot: "
+                             + ", ".join(cd["siblings_call_hotspot"]))
+            others = [m for m in (cd.get("sibling_methods") or [])
+                      if m not in set(cd.get("hotspot_calls_siblings") or [])
+                      | set(cd.get("siblings_call_hotspot") or [])]
+            if others:
+                lines.append("  method khác cùng class (không có quan hệ gọi trực "
+                             "tiếp): " + ", ".join(others[:12]))
+            parts.append("\n".join(lines))
+        elif occ.get("class_context"):
             parts.append(f"Hotspot là thành viên của class: {occ['class_context']}")
 
         for callee in occ["callees"]:

@@ -32,7 +32,7 @@ def _tool_version(exe: str, args: list[str] | None = None) -> str | None:
     try:
         proc = subprocess.run(
             [exe, *(args or ["--version"])],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
             timeout=_VERSION_TIMEOUT_SEC,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -52,12 +52,12 @@ def _git_commit(repo_root: Path) -> dict:
     try:
         rev = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
             timeout=_VERSION_TIMEOUT_SEC,
         )
         dirty = subprocess.run(
             ["git", "status", "--porcelain"], cwd=str(repo_root),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
             timeout=_VERSION_TIMEOUT_SEC,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:

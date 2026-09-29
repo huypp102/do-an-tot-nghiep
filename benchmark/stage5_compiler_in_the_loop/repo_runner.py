@@ -95,6 +95,25 @@ def build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     # Đừng để cache bytecode của repo lẫn vào lượt sau.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
+
+    # --- CHẶN MỌI THỨ CÓ THỂ HỎI NGƯỜI DÙNG -----------------------------
+    # Lỗi THẬT ở pilot 1 với `Shpota_github-activity-generator`: bộ test của
+    # repo gọi `git`, git hỏi username/password, và vì subprocess thừa hưởng
+    # stdin của tiến trình cha nên nó ĐỨNG CHỜ NHẬP mãi -- treo cả lượt chạy
+    # dataset. Trên máy thuê chạy `nohup` thì không ai thấy prompt đó, chỉ
+    # thấy lượt chạy im lặng đứng yên tới khi hết giờ.
+    #
+    # `stdin=DEVNULL` ở chỗ gọi lo phần lớn, nhưng git có đường riêng: nó có
+    # thể mở /dev/tty hoặc gọi askpass helper, bỏ qua stdin. Nên phải tắt cả
+    # hai đường bằng biến môi trường.
+    env["GIT_TERMINAL_PROMPT"] = "0"   # git không được hỏi qua terminal
+    env["GIT_ASKPASS"] = "/bin/true"   # helper trả rỗng ngay thay vì mở hộp thoại
+    env["SSH_ASKPASS"] = "/bin/true"
+    env["GCM_INTERACTIVE"] = "never"   # Git Credential Manager (Windows)
+    # pip/poetry cũng có thể hỏi; ép chế độ không tương tác.
+    env["PIP_NO_INPUT"] = "1"
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+
     if extra:
         env.update(extra)
     return env
@@ -198,7 +217,8 @@ def create_venv(work_dir: Path, timeout_sec: int = 300) -> tuple[Path | None, st
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec, env=env,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec, env=env,
         )
     except subprocess.TimeoutExpired:
         return None, f"tạo venv quá {timeout_sec}s"
@@ -227,7 +247,8 @@ def _pip_install(
         cmd = [str(py), "-m", "pip", "install", *args]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec,
             cwd=str(cwd), env=env,
         )
     except subprocess.TimeoutExpired:
@@ -272,13 +293,49 @@ def install_repo(
         else:
             installed_something = True
 
-    if (work_dir / "pyproject.toml").exists() or (work_dir / "setup.py").exists():
-        ok, err = _pip_install(py, ["-e", "."], work_dir, timeout_sec)
+    # --- PHỤ THUỘC RIÊNG CHO TEST -----------------------------------------
+    # Nhiều repo tách phụ thuộc test ra file riêng, nên `requirements.txt` cài
+    # xong mà `pytest` vẫn `ImportError` (thiếu mock, responses, freezegun...).
+    # Ở pilot 1 điều này làm bộ test fail vì lý do môi trường chứ không phải
+    # vì code -- và repo bị gán BASELINE_FAILED oan, loại khỏi mẫu.
+    #
+    # Cài SAU requirements.txt chính (để không ghi đè phiên bản repo đã ghim)
+    # và TRƯỚC khi chạy pytest. Không file nào bắt buộc phải có.
+    for dev_name in (
+        "requirements-dev.txt", "dev-requirements.txt", "test-requirements.txt",
+        "requirements-test.txt", "requirements_test.txt", "requirements/dev.txt",
+        "requirements/test.txt",
+    ):
+        dev_req = work_dir / dev_name
+        if not dev_req.exists():
+            continue
+        logger.info("Tìm thấy phụ thuộc test: %s -- đang cài.", dev_name)
+        ok, err = _pip_install(py, ["-r", str(dev_req)], work_dir, timeout_sec)
         if ok:
             installed_something = True
-        elif not installed_something:
-            return False, f"`pip install -e .` thất bại: {err}"
+            logger.info("Đã cài xong %s.", dev_name)
         else:
+            # KHÔNG chặn: thiếu phụ thuộc test thì pytest sẽ báo lỗi cụ thể, và
+            # đó là thông tin hữu ích hơn là dừng ngay ở đây.
+            logger.warning(
+                "Cài %s không xong (%s) -- chạy tiếp, pytest sẽ báo rõ nếu thiếu gì.",
+                dev_name, (err.splitlines()[-1] if err else "?"),
+            )
+
+    if (work_dir / "pyproject.toml").exists() or (work_dir / "setup.py").exists():
+        # `[test]`/`[dev]` extras là nơi phổ biến thứ hai để khai phụ thuộc test.
+        # Thử extras trước, thất bại thì lùi về bản trơn -- extras không tồn tại
+        # là chuyện thường, không phải lỗi.
+        for spec in ("-e", ".[test]"), ("-e", ".[dev]"), ("-e", "."):
+            ok, err = _pip_install(py, list(spec), work_dir, timeout_sec)
+            if ok:
+                installed_something = True
+                if spec[1] != ".":
+                    logger.info("Đã cài extras `%s`.", spec[1])
+                break
+        else:
+            if not installed_something:
+                return False, f"`pip install -e .` thất bại: {err}"
             logger.warning("`pip install -e .` lỗi nhưng requirements đã cài -- chạy tiếp.")
 
     if not installed_something:
@@ -393,7 +450,8 @@ def run_pytest(
     start = time.perf_counter()
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec,
             cwd=str(work_dir), env=env,
         )
     except subprocess.TimeoutExpired:
@@ -552,6 +610,7 @@ def uninstall_extensions(
         proc = subprocess.run(
             [str(py), "-m", "pip", "uninstall", "-y", *names],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=timeout_sec, env=env,
         )
         for n in names:
@@ -565,6 +624,7 @@ def uninstall_extensions(
         out = subprocess.run(
             [str(py), "-c", "import sysconfig;print(sysconfig.get_paths()['purelib'])"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL,
             timeout=60, env=env,
         )
         site_dir = Path((out.stdout or "").strip())
@@ -594,7 +654,7 @@ def uninstall_extensions(
         out = subprocess.run(
             [str(py), "-c", check], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=120,
-            cwd=str(work_dir), env=env,
+            stdin=subprocess.DEVNULL, cwd=str(work_dir), env=env,
         )
         import json as _json
 

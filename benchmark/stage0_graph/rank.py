@@ -165,7 +165,10 @@ def func_rank(graph: ProgramGraph) -> dict[str, tuple[float, str]]:
 
 
 def top_k_functions(
-    graph: ProgramGraph, k: int, build_mode: str = "static"
+    graph: ProgramGraph,
+    k: int,
+    build_mode: str = "static",
+    exclude_ids: set[str] | None = None,
 ) -> list[tuple[FunctionNode, float]]:
     """Trả về tối đa k phần tử (FunctionNode, score), sắp giảm dần theo
     FuncRank (đồng hạng thì sắp theo id để deterministic).
@@ -177,15 +180,25 @@ def top_k_functions(
     Khi PCG không có cạnh nào (vd nhiều file độc lập, không gọi lẫn nhau --
     trường hợp 4 file gốc viraj7 trong ví dụ README), PageRank tĩnh cho điểm
     đồng đều mọi hàm; top-K khi đó chỉ là K hàm đầu tiên theo thứ tự id.
+
+    `exclude_ids`: id bị loại khỏi DANH SÁCH ỨNG VIÊN trước khi cắt top-K.
+    Dùng để bỏ hàm test (xem stage0_graph/test_filter.py). Loại ở ĐÂY chứ
+    không xoá node khỏi graph: điểm FuncRank của các hàm còn lại vẫn tính trên
+    graph ĐẦY ĐỦ, nên công thức không đổi -- chỉ danh sách được chọn là đổi.
+    Trên lượt chạy thật, 18% chỗ trong candidate_pool bị hàm test chiếm (có
+    repo tới 60%), nên không loại thì pool rộng bao nhiêu cũng vô ích.
     """
+    skip = exclude_ids or set()
+    candidates = [f for f in graph.functions.values() if f.id not in skip]
+
     if build_mode == "static":
         scores = func_rank_static(graph)
-        ranked = sorted(graph.functions.values(), key=lambda f: (-scores.get(f.id, 0.0), f.id))
+        ranked = sorted(candidates, key=lambda f: (-scores.get(f.id, 0.0), f.id))
         return [(f, scores.get(f.id, 0.0)) for f in ranked[:k]]
 
     combined = func_rank(graph)
     ranked = sorted(
-        graph.functions.values(),
+        candidates,
         key=lambda f: (-combined.get(f.id, (0.0, "static_fallback"))[0], f.id),
     )
     return [(f, combined.get(f.id, (0.0, "static_fallback"))[0]) for f in ranked[:k]]

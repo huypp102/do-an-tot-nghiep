@@ -1,9 +1,14 @@
 """PHAN 2.5 -- kiem chung nhan CONFOUNDED.
 
-num_ctx=550: nhanh `graph` (~640 token) bi cat, nhanh `none` (~496) thi khong.
-Hotspot bi cat o BAT KY nhanh nao phai bi gan CONFOUNDED va LOAI khoi moi phep
-so sanh theo cap -- neu khong, "graph te hon" co the chi la "graph bi cat mat
-system prompt".
+Dat num_ctx NAM GIUA do dai 2 nhanh: nhanh `graph` bi cat, nhanh `none` thi
+khong. Hotspot bi cat o BAT KY nhanh nao phai bi gan CONFOUNDED va LOAI khoi
+moi phep so sanh theo cap -- neu khong, "graph te hon" co the chi la "graph bi
+cat mat system prompt".
+
+NGUONG DUOC TINH DONG, khong hard-code: prompt doi do thi ngưỡng cung phai doi.
+Ban truoc ghim 550 (dung voi prompt luc do: graph 620 / none 486), roi khoi
+huong dan API PyO3 lam CA HAI prompt dai hon nguong -> ca hai bi cat va test
+that bai vi ly do chang lien quan gi toi CONFOUNDED.
 """
 import json
 import logging
@@ -120,11 +125,43 @@ run_pipeline.resolve_dataset_repos = intake.resolve_dataset_repos
 original_load = run_pipeline.load_config
 
 
+def _midpoint_num_ctx() -> int:
+    """Tinh num_ctx NAM GIUA do dai prompt 2 nhanh, tu chinh prompt that.
+
+    Khong hard-code so: prompt doi thi nguong tu doi theo. Ban truoc ghim 550
+    (dung voi prompt luc do: graph 620 / none 486 token), roi khoi huong dan API
+    PyO3 lam CA HAI prompt vuot 550 -> ca hai bi cat, va test that bai vi ly do
+    chang lien quan gi toi CONFOUNDED.
+    """
+    from stage4_llm_transpile.generator_agent import build_signature_prompt
+
+    kw = dict(
+        function_name="sum_squares",
+        hotspot_source="def sum_squares(values):\n    return sum(v * v for v in values)\n",
+        context_text="ham goi hotspot: test_sum_squares_basic; hotspot goi: float",
+        tier="TIER1_NATIVE",
+        observed_types="  - doi so vi tri #0: list[int](n=3)",
+        ext_module="sum_squares_rsext",
+        io_examples=[{"function": "sum_squares", "args_repr": ["[1, 2, 3]"],
+                      "result_repr": "14.0"}],
+    )
+    n_graph = int(len(build_signature_prompt(**kw, include_graph_context=True)) / 3.5)
+    n_none = int(len(build_signature_prompt(**kw, include_graph_context=False)) / 3.5)
+    assert n_graph > n_none, f"nhanh graph phai dai hon: {n_graph} vs {n_none}"
+    mid = (n_graph + n_none) // 2
+    print(f"  do dai prompt uoc tinh: graph={n_graph} token, none={n_none} token")
+    print(f"  -> dat num_ctx={mid} (nam giua) de CHI nhanh graph bi cat")
+    return mid
+
+
+NUM_CTX = _midpoint_num_ctx()
+
+
 def patched(*a, **k):
     cfg = original_load(*a, **k)
     cfg["llm"].update({"enabled": True, "backend": "local", "num_agents": 2})
-    # NGUONG COT LOI cua phep thu: giua do dai prompt cua 2 nhanh.
-    cfg["llm"]["local"]["generator_num_ctx"] = 550
+    # NGUONG COT LOI cua phep thu: giua do dai prompt cua 2 nhanh, tinh dong.
+    cfg["llm"]["local"]["generator_num_ctx"] = NUM_CTX
     cfg["dataset"]["enabled"] = True
     cfg["dataset"]["source_root"] = str(BENCH / "data" / "fake_dataset")
     cfg["graph"]["candidate_pool"] = 30
@@ -142,7 +179,7 @@ run_pipeline.load_config = patched
 
 errs = []
 print("=" * 78)
-print("CONFOUNDED -- num_ctx=550")
+print(f"CONFOUNDED -- num_ctx={NUM_CTX}")
 print("=" * 78)
 code = run_pipeline.main()
 print(f"\n### EXIT CODE = {code}")

@@ -35,7 +35,18 @@ logger = logging.getLogger("benchmark.ablation")
 
 ARM_GRAPH = "graph"
 ARM_NONE = "none"
+ARM_GRAPH_REPEAT = "graph2"
+"""PHA 5 -- NHIỄU NỀN. Chạy lại CHÍNH nhánh `graph` một lượt độc lập thứ hai
+(cùng prompt, seed khác) để đo mức bất đồng do NGẪU NHIÊN của LLM.
+
+VÌ SAO BẮT BUỘC CÓ: nếu graph-vs-none bất đồng ở 3 hotspot, con số đó vô nghĩa
+khi chưa biết graph-vs-graph cũng bất đồng ở 3 hotspot. Không có nhiễu nền thì
+mọi chênh lệch quan sát được đều có thể chỉ là LLM trả lời khác nhau giữa hai
+lần gọi -- và đó là kết luận sai kiểu khó phát hiện nhất, vì nó trông như có
+phát hiện."""
+
 DEFAULT_ARMS = (ARM_GRAPH, ARM_NONE)
+ALL_ARMS = (ARM_GRAPH, ARM_NONE, ARM_GRAPH_REPEAT)
 
 # Các chỉ số được so theo cặp. Thứ tự = thứ tự trong phễu.
 PAIRED_METRICS = ("compiled", "correct_fn", "regression_free", "accepted")
@@ -46,18 +57,38 @@ def is_enabled(cfg: dict) -> bool:
 
 
 def arms(cfg: dict) -> list[str]:
-    configured = (cfg.get("ablation") or {}).get("arms") or list(DEFAULT_ARMS)
-    unknown = [a for a in configured if a not in DEFAULT_ARMS]
+    """Danh sách nhánh sẽ chạy, kể cả nhánh NHIỄU NỀN nếu bật."""
+    ab = cfg.get("ablation") or {}
+    configured = ab.get("arms") or list(DEFAULT_ARMS)
+    unknown = [a for a in configured if a not in ALL_ARMS]
     if unknown:
         logger.warning(
             "ablation.arms có nhánh không hiểu: %s -- chỉ hỗ trợ %s, bỏ qua phần lạ.",
-            unknown, list(DEFAULT_ARMS),
+            unknown, list(ALL_ARMS),
         )
-    return [a for a in configured if a in DEFAULT_ARMS] or list(DEFAULT_ARMS)
+    out = [a for a in configured if a in ALL_ARMS] or list(DEFAULT_ARMS)
+    if noise_floor_enabled(cfg) and ARM_GRAPH in out and ARM_GRAPH_REPEAT not in out:
+        # Đặt CUỐI: nhánh này chỉ có nghĩa khi đã có nhánh graph để so.
+        out.append(ARM_GRAPH_REPEAT)
+    return out
+
+
+def noise_floor_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("ablation") or {}).get("noise_floor", False))
+
+
+def noise_floor_max_hotspots(cfg: dict) -> int:
+    """Giới hạn số hotspot chạy lượt nhiễu nền. Mỗi hotspot là một lời gọi LLM
+    nữa, nên giới hạn để không nhân đôi hoá đơn GPU cho cả dataset."""
+    return int((cfg.get("ablation") or {}).get("noise_floor_max_hotspots", 10))
 
 
 def includes_graph_context(arm: str) -> bool:
-    """Cờ DUY NHẤT phân biệt hai nhánh."""
+    """Cờ DUY NHẤT phân biệt các nhánh.
+
+    `graph2` (nhiễu nền) là bản LẶP LẠI của `graph`, nên nó CÓ context -- prompt
+    của nó phải giống `graph` từng ký tự, chỉ khác seed.
+    """
     return arm != ARM_NONE
 
 
@@ -134,6 +165,57 @@ class PairedComparison:
         }
 
 
+def compare_two_arms(
+    left_side: dict[str, ArmResult],
+    right_side: dict[str, ArmResult],
+    left_name: str,
+    right_name: str,
+) -> dict:
+    """So sánh THEO CẶP hai nhánh bất kỳ. Dùng cho cả graph-vs-none lẫn
+    graph-vs-graph2 (nhiễu nền) -- CÙNG một hàm để hai con số so được với nhau;
+    hai hàm riêng là cách chắc chắn nhất để chúng lệch nhau theo thời gian."""
+    common = sorted(set(left_side) & set(right_side))
+    confounded = [
+        n for n in common if left_side[n].truncated or right_side[n].truncated
+    ]
+    usable = [n for n in common if n not in confounded]
+    generated_both = [
+        n for n in usable
+        if left_side[n].flags.get("generated") and right_side[n].flags.get("generated")
+    ]
+
+    comparisons: dict[str, PairedComparison] = {}
+    for metric in PAIRED_METRICS:
+        pc = PairedComparison(metric=metric)
+        for n in generated_both:
+            l = bool(left_side[n].flags.get(metric))
+            r = bool(right_side[n].flags.get(metric))
+            if metric == "regression_free" and (
+                left_side[n].vacuous or right_side[n].vacuous
+            ):
+                continue
+            if l and r:
+                pc.both_ok += 1
+            elif l and not r:
+                pc.graph_only += 1      # "left đúng, right sai"
+            elif r and not l:
+                pc.none_only += 1       # "right đúng, left sai"
+            else:
+                pc.both_fail += 1
+        comparisons[metric] = pc
+
+    return {
+        "left": left_name,
+        "right": right_name,
+        "n_common": len(common),
+        "n_confounded": len(confounded),
+        "confounded": confounded,
+        "n_generated_both": len(generated_both),
+        "generated_both": generated_both,
+        "comparisons": {m: pc.as_dict() for m, pc in comparisons.items()},
+    }
+
+
 def build_pairs(
     per_arm: dict[str, dict[str, ArmResult]],
     min_discordant: int = 10,
@@ -207,6 +289,58 @@ def build_pairs(
             }
             for arm, side in per_arm.items()
         },
+        # --- PHA 5: NHIỄU NỀN ------------------------------------------------
+        "noise_floor": _noise_floor_block(per_arm, comparisons, min_discordant),
+    }
+
+
+def _noise_floor_block(
+    per_arm: dict[str, dict[str, ArmResult]],
+    effect_comparisons: dict[str, PairedComparison],
+    min_discordant: int,
+) -> dict:
+    """So graph-vs-graph2 (nhiễu) với graph-vs-none (hiệu ứng).
+
+    Kết luận CHỈ được rút ra khi số cặp bất đồng của hiệu ứng LỚN HƠN của nhiễu.
+    Bằng nhau hoặc nhỏ hơn -> `KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU`, và điều đó phải
+    được nói thẳng chứ không để người đọc tự suy từ hai bảng rời.
+    """
+    graph_side = per_arm.get(ARM_GRAPH) or {}
+    repeat_side = per_arm.get(ARM_GRAPH_REPEAT) or {}
+    if not repeat_side:
+        return {
+            "available": False,
+            "note": (
+                "Chưa chạy nhánh nhiễu nền (ablation.noise_floor=false). Không có "
+                "nhiễu nền thì KHÔNG biết chênh lệch graph-vs-none có vượt mức "
+                "ngẫu nhiên của LLM hay không -- mọi kết luận về tác động của "
+                "context đều chưa có cơ sở."
+            ),
+        }
+
+    noise = compare_two_arms(graph_side, repeat_side, ARM_GRAPH, ARM_GRAPH_REPEAT)
+    per_metric: dict[str, dict] = {}
+    for metric in PAIRED_METRICS:
+        eff = effect_comparisons[metric].n_discordant
+        noi = (noise["comparisons"].get(metric) or {}).get("n_discordant", 0)
+        if eff > noi:
+            verdict = "HIỆU ỨNG VƯỢT NHIỄU"
+        elif noise["n_generated_both"] == 0:
+            verdict = "KHÔNG ĐO ĐƯỢC NHIỄU (nhánh lặp không sinh được code)"
+        else:
+            verdict = "KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU"
+        per_metric[metric] = {
+            "n_discordant_effect": eff,
+            "n_discordant_noise": noi,
+            "verdict": verdict,
+            "conclusive": eff > noi and eff >= min_discordant,
+        }
+
+    return {
+        "available": True,
+        "comparison": noise,
+        "per_metric": per_metric,
+        "n_hotspots_repeated": len(repeat_side),
     }
 
 
@@ -268,6 +402,42 @@ def format_report(paired: dict, cfg: dict | None = None) -> str:
             f"Số cặp bất đồng đạt ngưỡng {min_disc}. Có thể áp kiểm định "
             "McNemar trên cặp (graph_only, none_only) cho từng chỉ số; báo cáo "
             "này chỉ cung cấp số đếm, việc kiểm định làm ở bước phân tích."
+        )
+    lines.append("")
+
+    # --- PHA 5: NHIỄU NỀN, đặt NGAY CẠNH bảng hiệu ứng -------------------
+    nf = paired.get("noise_floor") or {}
+    lines.append("NHIỄU NỀN: graph vs graph2 (cùng prompt, seed khác)")
+    lines.append("-" * 92)
+    if not nf.get("available"):
+        lines.append("  " + str(nf.get("note", "chưa chạy")))
+    else:
+        cmp_ = nf.get("comparison") or {}
+        lines.append(
+            f"  hotspot chạy lặp: {nf.get('n_hotspots_repeated', 0)} | "
+            f"sinh được code ở cả 2 lượt: {cmp_.get('n_generated_both', 0)}"
+        )
+        h = (
+            f"{'chỉ số':<18}{'bất đồng HIỆU ỨNG':>20}{'bất đồng NHIỄU':>17}"
+            f"   kết luận"
+        )
+        lines.append(h)
+        lines.append("-" * len(h))
+        for metric in PAIRED_METRICS:
+            row = (nf.get("per_metric") or {}).get(metric) or {}
+            lines.append(
+                f"{metric:<18}{row.get('n_discordant_effect', 0):>20}"
+                f"{row.get('n_discordant_noise', 0):>17}   {row.get('verdict', '?')}"
+            )
+        lines.append("")
+        lines.append(
+            "  'bất đồng HIỆU ỨNG' = graph vs none. 'bất đồng NHIỄU' = graph vs "
+            "graph2 (chính nó, seed khác)."
+        )
+        lines.append(
+            "  Hiệu ứng KHÔNG lớn hơn nhiễu nghĩa là chênh lệch quan sát được có "
+            "thể chỉ do LLM trả lời khác nhau giữa hai lần gọi -- KHÔNG kết luận "
+            "gì về tác động của context."
         )
     lines.append("")
 

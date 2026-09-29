@@ -54,7 +54,7 @@ class Check:
 def _run(cmd: list[str], timeout: int = 60, cwd: str | None = None) -> tuple[int, str]:
     try:
         p = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8",
+            cmd, capture_output=True, stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
             errors="replace", timeout=timeout, cwd=cwd,
         )
     except subprocess.TimeoutExpired:
@@ -267,6 +267,99 @@ def warmup_models_and_check_loaded(cfg: dict) -> list[Check]:
     return checks
 
 
+def check_pyo3_example_compiles(timeout_sec: int = 600) -> Check:
+    """BIÊN DỊCH THẬT khuôn mẫu PyO3 trong prompt bằng `cargo check`.
+
+    Đây là phép kiểm quan trọng nhất trong preflight. Lượt chạy thực nghiệm đầu
+    tiên cho `compiled = 0` ở CẢ 9 repo vì prompt dạy model viết theo API PyO3
+    cũ trong khi crate ghim 0.22 -- lỗi đó chỉ lộ ra sau khi đã tốn giờ GPU cho
+    9 repo. Nếu chính khuôn mẫu ta đưa vào prompt còn không biên dịch được, thì
+    không có lý do gì để tin code model viết theo nó sẽ biên dịch được.
+
+    Test `tests/test_pyo3_prompt_matches_version.py` chỉ so KHỚP CHUỖI (chạy
+    được ở máy không có Rust). Phép kiểm này là bằng chứng thật, và nó chỉ chạy
+    được ở nơi có cargo -- tức là máy thuê.
+    """
+    from stage4_llm_transpile.generator_agent import PYO3_API_VERSION, PYO3_EXAMPLE
+    from stage5_compiler_in_the_loop.crate_builder import (
+        CARGO_TOML_TEMPLATE,
+        PYO3_VERSION,
+        RUST_EDITION,
+    )
+
+    if PYO3_VERSION != PYO3_API_VERSION:
+        return Check(
+            "pyo3_example_compiles", False,
+            detail=(
+                f"LỆCH VERSION trước cả khi biên dịch: Cargo.toml ghim "
+                f"{PYO3_VERSION}, prompt dạy API {PYO3_API_VERSION}"
+            ),
+            fix="sửa crate_builder.PYO3_VERSION và generator_agent.PYO3_API_VERSION cho khớp",
+        )
+
+    if shutil.which("cargo") is None:
+        return Check(
+            "pyo3_example_compiles", True, required=False,
+            detail="bỏ qua -- không có cargo (chỉ kiểm được trên máy có Rust toolchain)",
+            fix="trên máy thuê PHẢI có cargo để phép kiểm này chạy",
+        )
+
+    ext = "preflight_pyo3_probe"
+    import re as _re
+
+    blocks = _re.findall(
+        r"```rust\s*\n(.*?)```",
+        PYO3_EXAMPLE.format(pyo3_version=PYO3_API_VERSION, ext_module=ext),
+        flags=_re.DOTALL,
+    )
+    if not blocks:
+        return Check(
+            "pyo3_example_compiles", False,
+            detail="không tách được khối ```rust nào từ PYO3_EXAMPLE",
+            fix="kiểm tra lại generator_agent.PYO3_EXAMPLE",
+        )
+
+    tmp = Path(tempfile.mkdtemp(prefix="preflight_pyo3_"))
+    try:
+        (tmp / "src").mkdir(parents=True, exist_ok=True)
+        (tmp / "Cargo.toml").write_text(
+            CARGO_TOML_TEMPLATE.format(
+                function_name="preflight_probe", ext_module=ext,
+                edition=RUST_EDITION, pyo3=PYO3_VERSION,
+            ),
+            encoding="utf-8",
+        )
+        (tmp / "src" / "lib.rs").write_text("\n".join(blocks), encoding="utf-8")
+        code, out = _run(
+            ["cargo", "check", "--quiet"], timeout=timeout_sec, cwd=str(tmp)
+        )
+        if code == 0:
+            return Check(
+                "pyo3_example_compiles", True,
+                detail=f"khuôn mẫu trong prompt BIÊN DỊCH ĐƯỢC với pyo3 {PYO3_VERSION}",
+                data={"pyo3_version": PYO3_VERSION},
+            )
+        return Check(
+            "pyo3_example_compiles", False,
+            detail=f"khuôn mẫu KHÔNG biên dịch được (exit={code}): {out[-800:]}",
+            fix=(
+                "sửa generator_agent.PYO3_EXAMPLE cho đúng API của pyo3 "
+                f"{PYO3_VERSION}. ĐỪNG chạy thực nghiệm khi mục này còn hỏng: "
+                "model bắt chước khuôn mẫu sai thì mọi hotspot sẽ COMPILE_FAILED "
+                "như lượt chạy trước."
+            ),
+            data={"cargo_output": out[-2000:]},
+        )
+    except OSError as exc:
+        return Check(
+            "pyo3_example_compiles", False,
+            detail=f"không dựng được crate thử: {exc}",
+            fix="kiểm tra quyền ghi vào thư mục tạm",
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check_dataset(cfg: dict) -> list[Check]:
     """Dataset đúng cấu trúc, và đường dẫn KHÔNG trỏ vào `target_projects`."""
     root_str = str(((cfg.get("dataset") or {}).get("source_root")) or "").strip()
@@ -375,6 +468,10 @@ def check_git_state() -> Check:
 def run_all(cfg: dict, skip_llm: bool = False) -> list[Check]:
     checks: list[Check] = [check_python(), check_venv_creation()]
     checks += check_rust_toolchain()
+    # Ngay sau khi biết có cargo: kiểm khuôn mẫu PyO3 trong prompt có biên dịch
+    # được không. Hỏng ở đây thì mọi hotspot sẽ COMPILE_FAILED, chạy tiếp là
+    # đốt giờ GPU vô ích.
+    checks.append(check_pyo3_example_compiles())
     checks += check_dataset(cfg)
     checks.append(check_disk(cfg))
     checks.append(check_git_state())

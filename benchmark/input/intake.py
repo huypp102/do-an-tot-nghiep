@@ -145,9 +145,18 @@ def clone_github_repo(
     clone_root.mkdir(parents=True, exist_ok=True)
     cmd = ["git", "clone", "--depth", "1", url, str(dest)]
     logger.info("Đang clone %s -> %s ...", url, dest)
+    # `stdin=DEVNULL` + 2 biến môi trường: KHÔNG để git hỏi username/password.
+    # Repo riêng tư hoặc URL sai sẽ làm git mở prompt đăng nhập, và vì subprocess
+    # thừa hưởng stdin của tiến trình cha nên nó đứng chờ nhập tới khi hết
+    # timeout. Chạy bằng `nohup` trên máy thuê thì không ai thấy prompt đó --
+    # chỉ thấy lượt chạy im lặng đứng yên. Đúng lỗi đã gặp ở pilot 1.
+    from stage5_compiler_in_the_loop.repo_runner import build_child_env
+
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=CLONE_TIMEOUT_SEC
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, env=build_child_env(),
+            timeout=CLONE_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired as exc:
         _cleanup_partial_clone(dest)

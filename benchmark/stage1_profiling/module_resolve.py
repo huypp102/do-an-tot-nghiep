@@ -39,6 +39,13 @@ class HotspotSpec:
     qualname: str           # vd "normalize" hoặc "Foo.method"
     import_root: str        # thư mục phải có trong sys.path để import được
     file: str               # đường dẫn gốc, giữ lại để báo lỗi cho người đọc
+    # --- Tên trùng (PHA 2) ---
+    # `ambiguous_name=True` nghĩa là tên hotspot khớp nhiều node mà KHÔNG phân
+    # biệt được. Vẫn chạy (giữ hành vi cũ) nhưng phải lộ ra trong kết quả: đối
+    # số ghi được và bản Rust có thể không thuộc cùng một hàm.
+    ambiguous_name: bool = False
+    ambiguity_detail: str = ""
+    n_name_matches: int = 1
 
     @property
     def target(self) -> str:
@@ -113,10 +120,10 @@ def build_hotspot_specs(
     `outcomes.UNRESOLVABLE_IMPORT`.
 
     `graph` là `ProgramGraph` của Stage 0. Một tên hàm trần có thể ứng với
-    NHIỀU node (2 file cùng định nghĩa `normalize`); chọn node ĐẦU TIÊN và ghi
-    log, vì registry/báo cáo phía sau đều khoá theo tên trần nên không phân
-    biệt được nhiều hơn. Đây là giới hạn đã biết của việc khớp theo tên, ghi
-    lại ở đây để không ai tưởng là bug mới.
+    NHIỀU node (2 file cùng định nghĩa `normalize`, hay `__init__` khớp 4 class).
+    Việc chọn node nào do `_pick_node` lo, theo thứ tự ưu tiên rõ ràng; khi
+    không phân biệt được thì hotspot bị gắn cờ `ambiguous_name` thay vì lặng lẽ
+    lấy node đầu tiên.
     """
     specs: list[HotspotSpec] = []
     skipped: dict[str, str] = {}
@@ -125,18 +132,16 @@ def build_hotspot_specs(
     for node in (graph.functions or {}).values():
         by_name.setdefault(node.name, []).append(node)
 
+    # Nơi Stage 0 phát hiện hotspot: dùng làm căn cứ ƯU TIÊN khi tên trùng.
+    hint_files = {n: nodes[0].file for n, nodes in by_name.items() if len(nodes) == 1}
+
     for name in function_names:
         nodes = by_name.get(name) or []
         if not nodes:
             skipped[name] = f"Stage 0 không có node nào tên '{name}'"
             continue
-        if len(nodes) > 1:
-            logger.warning(
-                "Hotspot '%s' khớp %d node (%s) -- dùng node đầu tiên; khớp "
-                "theo tên trần không phân biệt được nhiều hơn.",
-                name, len(nodes), ", ".join(n.file for n in nodes[:3]),
-            )
-        node = nodes[0]
+
+        node, ambiguous, why = _pick_node(name, nodes, hint_files.get(name))
         module, import_root, err = resolve_module(Path(node.file), repo_root)
         if err or module is None or import_root is None:
             skipped[name] = err or "không resolve được module"
@@ -148,6 +153,73 @@ def build_hotspot_specs(
             qualname=node.qualified_name or name,
             import_root=import_root,
             file=node.file,
+            ambiguous_name=ambiguous,
+            ambiguity_detail=why,
+            n_name_matches=len(nodes),
         ))
 
     return specs, skipped
+
+
+def _pick_node(name: str, nodes: list, hint_file: str | None):
+    """Chọn node cho một tên hotspot khi tên đó khớp NHIỀU node.
+
+    VẤN ĐỀ THẬT (pilot 1): `__init__` khớp 4 node khác nhau, và bản cũ lặng lẽ
+    lấy node đầu tiên. Nghĩa là đối số được ghi từ `A.__init__` có thể bị đem so
+    với bản Rust dịch từ `B.__init__` -- sai mà không ai biết, vì không có dấu
+    hiệu nào trong kết quả.
+
+    Thứ tự ưu tiên:
+      (a) node NẰM CÙNG FILE với nơi hotspot được phát hiện;
+      (b) nếu vẫn còn nhiều hơn 1, chọn node có `qualified_name` ĐẦY ĐỦ NHẤT
+          (vd `module.ClassName.method` thay vì tên trần) -- tên đủ điều kiện
+          phân biệt được method của 2 class khác nhau;
+      (c) hết cách thì giữ hành vi cũ (lấy đầu tiên, theo thứ tự id cho tất
+          định) NHƯNG gắn cờ `AMBIGUOUS_NAME` để không dùng nhầm âm thầm.
+
+    Trả về (node, ambiguous: bool, lý do).
+    """
+    if len(nodes) == 1:
+        return nodes[0], False, ""
+
+    # Sắp theo id trước để mọi nhánh đều tất định.
+    ordered = sorted(nodes, key=lambda n: n.id)
+
+    # (a) cùng file với nơi phát hiện.
+    if hint_file:
+        same_file = [n for n in ordered if n.file == hint_file]
+        if len(same_file) == 1:
+            logger.info(
+                "Hotspot '%s' khớp %d node -> chọn node cùng file với nơi phát "
+                "hiện (%s).", name, len(nodes), hint_file,
+            )
+            return same_file[0], False, ""
+        if same_file:
+            ordered = same_file
+
+    # (b) tên đủ điều kiện dài nhất (nhiều thành phần nhất) phân biệt được.
+    by_depth: dict[int, list] = {}
+    for n in ordered:
+        depth = len((n.qualified_name or n.name or "").split("."))
+        by_depth.setdefault(depth, []).append(n)
+    deepest = by_depth[max(by_depth)]
+    quals = {(n.qualified_name or n.name) for n in ordered}
+    if len(deepest) == 1 and len(quals) == len(ordered):
+        chosen = deepest[0]
+        logger.info(
+            "Hotspot '%s' khớp %d node -> phân biệt được bằng qualified_name "
+            "'%s'.", name, len(nodes), chosen.qualified_name,
+        )
+        return chosen, False, ""
+
+    # (c) không phân biệt được -> giữ hành vi cũ nhưng GẮN CỜ.
+    detail = (
+        f"tên '{name}' khớp {len(nodes)} node không phân biệt được: "
+        + "; ".join(f"{n.qualified_name or n.name}@{n.file}:{n.lineno_start}"
+                    for n in ordered[:4])
+        + ("; ..." if len(ordered) > 4 else "")
+        + f". Đã dùng node đầu tiên ({ordered[0].file}) -- đối số ghi được và "
+          "bản Rust có thể KHÔNG thuộc cùng một hàm."
+    )
+    logger.warning("Hotspot '%s': AMBIGUOUS_NAME -- %s", name, detail)
+    return ordered[0], True, detail

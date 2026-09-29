@@ -44,7 +44,9 @@ logger = logging.getLogger("benchmark.run_experiment1")
 SELECTION_RULE = (
     "Sàng tối đa `screening_limit` repo đầu tiên theo THỨ TỰ TÊN. Giữ repo thoả "
     "CẢ HAI điều kiện: (1) bộ test Python gốc chạy được và pass >= 1 test "
-    "(repo_status != BASELINE_FAILED/INSTALL_FAILED/TIMEOUT), (2) có >= "
+    "(repo_status không thuộc {BASELINE_FAILED, INSTALL_FAILED, TIMEOUT}; "
+    "bước sàng chạy KHÔNG có LLM nên ALL_HOTSPOTS_FAILED_COMPILE không thể "
+    "xuất hiện ở đây), (2) có >= "
     "`min_replayable_hotspots` hotspot ghi + phát lại được đối số thật. Chọn "
     "`n_repos` repo đầu tiên thoả, cộng `n_backup_repos` repo dự phòng dùng để "
     "THAY khi một repo đã chọn bị INSTALL_FAILED ở lượt chạy chính."
@@ -94,7 +96,11 @@ def screen_repo(cfg: dict, repo: Path, results_dir: Path, run_id: str) -> dict:
 def evaluate_candidate(row: dict, min_replayable: int) -> tuple[bool, str]:
     """Áp QUY TẮC CỐ ĐỊNH lên kết quả sàng. Trả về (nhận?, lý do)."""
     status = row.get("repo_status", "?")
-    if status in ("BASELINE_FAILED", "INSTALL_FAILED", "TIMEOUT", "SCREEN_ERROR"):
+    # `ALL_HOTSPOTS_FAILED_COMPILE` cũng là loại: repo đã tới được bước sinh
+    # code mà không biên dịch được thì đem vào lượt chính cũng không ra số
+    # liệu. (Bước sàng không bật LLM nên thực tế không gặp, liệt kê cho đủ.)
+    if status in ("BASELINE_FAILED", "INSTALL_FAILED", "TIMEOUT", "SCREEN_ERROR",
+                  "ALL_HOTSPOTS_FAILED_COMPILE"):
         return False, f"{status}: {str(row.get('status_note') or '')[:160]}"
     counts = (row.get("funnel") or {}).get("counts") or {}
     n_replayable = int(counts.get("replayable") or 0)

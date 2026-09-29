@@ -115,16 +115,31 @@ def build_graph(files: list[Path], root: Path) -> ProgramGraph:
                 continue
             functions[fn.id] = fn
 
-    call_edges = _resolve_call_edges(functions)
+    call_edges, call_resolution = _resolve_call_edges(functions)
     import_edges = _resolve_import_edges(files_map)
 
-    return ProgramGraph(
+    graph = ProgramGraph(
         functions=functions,
         call_edges=call_edges,
         files=files_map,
         import_edges=import_edges,
         backend=backend,
+        call_resolution=call_resolution,
     )
+
+    # --- PSG ĐẦY ĐỦ (POLO Table 1): class, biến toàn cục, kế thừa, sở hữu ---
+    # Thêm vào field RIÊNG, KHÔNG chạm `files`/`import_edges` (PSG rút gọn) vì
+    # stage3_context_packaging đang dùng chúng. Thất bại ở đây chỉ làm mất
+    # thông tin bổ sung, không làm sập Stage 0 -- xem psg.build_rich_psg.
+    from .psg import build_rich_psg
+
+    rich = build_rich_psg(files, root, functions)
+    graph.classes = rich.classes
+    graph.global_vars = rich.global_vars
+    graph.inheritance_edges = rich.inheritance_edges
+    graph.ownership_edges = rich.ownership_edges
+    graph.psg_backend = rich.backend
+    return graph
 
 
 def _rel_posix(path: Path, root: Path) -> str:
@@ -300,7 +315,9 @@ def _parse_file_ast(path: Path, root: Path) -> tuple[list[FunctionNode], FileNod
 # Resolve PCG call edges (dùng chung cho cả 2 backend)
 # =============================================================================
 
-def _resolve_call_edges(functions: dict[str, FunctionNode]) -> list[CallEdge]:
+def _resolve_call_edges(
+    functions: dict[str, FunctionNode]
+) -> tuple[list[CallEdge], dict]:
     """Trả về list[CallEdge] cho PCG TĨNH -- count=0, time_contribution_pct=None
     (chỉ biết CÓ quan hệ gọi hàm qua phân tích tĩnh, chưa đo tần suất/thời
     gian thật; stage1_profiling/dynamic_profiler.py::apply_dynamic_profile sẽ điền thêm
@@ -311,18 +328,30 @@ def _resolve_call_edges(functions: dict[str, FunctionNode]) -> list[CallEdge]:
 
     edges: list[CallEdge] = []
     warned_names: set[str] = set()
+    n_exact = n_heuristic = n_unresolved = n_out_of_scope = 0
     for fid, fn in functions.items():
         for raw_name in fn.calls_raw:
             candidates = name_index.get(raw_name)
             if not candidates:
-                continue  # gọi hàm ngoài scope (thư viện, stdlib, ...) -- bỏ qua, không phải lỗi
+                # Gọi hàm NGOÀI scope (thư viện, stdlib) -- không phải lỗi, và
+                # KHÔNG tính vào unresolved: nó không nói gì về chất lượng graph.
+                n_out_of_scope += 1
+                continue
             if len(candidates) == 1:
-                edges.append(CallEdge(caller=fid, callee=candidates[0]))
+                edges.append(CallEdge(caller=fid, callee=candidates[0], resolution="exact"))
+                n_exact += 1
                 continue
             same_file = [c for c in candidates if functions[c].file == fn.file]
             if len(same_file) == 1:
-                edges.append(CallEdge(caller=fid, callee=same_file[0]))
-            elif raw_name not in warned_names:
+                edges.append(CallEdge(
+                    caller=fid, callee=same_file[0], resolution="heuristic"
+                ))
+                n_heuristic += 1
+                continue
+            # Không đoán được -> ghi nhận là MÙ, cả ở mức graph và mức hàm.
+            n_unresolved += 1
+            fn.unresolved_call_count += 1
+            if raw_name not in warned_names:
                 logger.warning(
                     "PCG: tên hàm '%s' trùng ở %d nơi trong scope -- bỏ qua "
                     "resolve cạnh gọi hàm cho tên này (bản đơn giản, không "
@@ -330,7 +359,19 @@ def _resolve_call_edges(functions: dict[str, FunctionNode]) -> list[CallEdge]:
                     raw_name, len(candidates),
                 )
                 warned_names.add(raw_name)
-    return edges
+
+    total = n_exact + n_heuristic + n_unresolved
+    stats = {
+        "n_exact": n_exact,
+        "n_heuristic": n_heuristic,
+        "n_unresolved": n_unresolved,
+        "n_out_of_scope": n_out_of_scope,
+        "n_in_scope_calls": total,
+        "exact_ratio": (n_exact / total) if total else 0.0,
+        "heuristic_ratio": (n_heuristic / total) if total else 0.0,
+        "unresolved_ratio": (n_unresolved / total) if total else 0.0,
+    }
+    return edges, stats
 
 
 # =============================================================================

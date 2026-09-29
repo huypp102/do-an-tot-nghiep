@@ -32,8 +32,21 @@ PARTIAL = "PARTIAL"
 riêng. Vẫn dùng được cho so sánh, chỉ cần ghi rõ phần bị loại."""
 
 NO_MEASURABLE_HOTSPOT = "NO_MEASURABLE_HOTSPOT"
-"""Không hotspot nào đo được -> repo này không đóng góp số liệu nào. Đây là
-trạng thái mà trước Pha 0 bị báo nhầm thành thành công."""
+"""Không hotspot nào đo được VÀ chưa hotspot nào tới được bước sinh code.
+Nghĩa là repo rụng ở khâu trước LLM: không phát lại được đối số, không thuộc
+tầng hỗ trợ, hoặc Decision Gate gạt hết."""
+
+ALL_HOTSPOTS_FAILED_COMPILE = "ALL_HOTSPOTS_FAILED_COMPILE"
+"""Đã sinh được code Rust cho >= 1 hotspot nhưng KHÔNG cái nào biên dịch được.
+
+TÁCH RIÊNG khỏi `NO_MEASURABLE_HOTSPOT` vì hai nguyên nhân khác hẳn nhau và
+cách sửa cũng khác hẳn: cái trên là vấn đề của khâu ghi/phát lại đối số hoặc
+phân tầng kiểu, còn cái này là vấn đề của PROMPT hoặc MODEL sinh code.
+
+Lượt chạy thật đầu tiên (9 repo) cho `generated` = 1..5 nhưng `compiled` = 0 ở
+CẢ 9 repo -- gộp chung một nhãn thì bảng kết quả trông như "không tìm được
+hotspot nào", trong khi nguyên nhân thật là prompt dạy model viết theo API
+PyO3 cũ (&PyList/&PyModule) còn crate ghim pyo3 0.22 (cần Bound<'_, T>)."""
 
 BASELINE_FAILED = "BASELINE_FAILED"
 """Bộ test Python NGUYÊN BẢN của repo đã fail (hoặc không chạy được). Repo bị
@@ -46,7 +59,8 @@ TIMEOUT = "TIMEOUT"
 """Vượt `repo_time_budget_sec` hoặc `test_timeout_sec`."""
 
 REPO_STATUSES = (
-    OK, PARTIAL, NO_MEASURABLE_HOTSPOT, BASELINE_FAILED, INSTALL_FAILED, TIMEOUT,
+    OK, PARTIAL, NO_MEASURABLE_HOTSPOT, ALL_HOTSPOTS_FAILED_COMPILE,
+    BASELINE_FAILED, INSTALL_FAILED, TIMEOUT,
 )
 
 # ------------------------------------------------------------- HotspotReason
@@ -142,6 +156,8 @@ def decide_repo_status(
     baseline_failed: bool = False,
     install_failed: bool = False,
     timed_out: bool = False,
+    n_generated: int | None = None,
+    n_compiled: int | None = None,
 ) -> str:
     """Suy ra `RepoStatus` từ lý do của từng hotspot + các cờ mức repo.
 
@@ -149,6 +165,12 @@ def decide_repo_status(
     phải thắng, vì khi môi trường sai thì lý do của từng hotspot không đáng
     tin. Đặc biệt `BASELINE_FAILED` phải được giữ nguyên để tầng trên biết mà
     LOẠI repo khỏi so sánh, không tính lỗi đó cho hybrid.
+
+    `n_generated`/`n_compiled` đến từ phễu (funnel.counts). Khi đã sinh được
+    code mà không cái nào biên dịch được, trả `ALL_HOTSPOTS_FAILED_COMPILE`
+    thay vì `NO_MEASURABLE_HOTSPOT` -- hai nguyên nhân khác nhau thì phải có
+    hai nhãn khác nhau, nếu không bảng kết quả sẽ chỉ sai nguyên nhân chứ
+    không sai con số, mà đó là kiểu sai khó phát hiện nhất.
     """
     if install_failed:
         return INSTALL_FAILED
@@ -159,6 +181,8 @@ def decide_repo_status(
 
     n_measured = sum(1 for r in hotspot_reasons if r == MEASURED)
     if n_measured == 0:
+        if (n_generated or 0) > 0 and (n_compiled or 0) == 0:
+            return ALL_HOTSPOTS_FAILED_COMPILE
         return NO_MEASURABLE_HOTSPOT
     if n_measured == len(hotspot_reasons):
         return OK

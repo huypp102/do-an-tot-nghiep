@@ -179,6 +179,17 @@ ablation:
   # báo cáo CHỈ in số đếm kèm ghi chú cỡ mẫu nhỏ, không kết luận.
   min_discordant_pairs: 10
 
+  # NHIỄU NỀN (PHA 5). Chạy thêm một lượt sinh ĐỘC LẬP của CHÍNH nhánh `graph`
+  # (cùng prompt, seed khác) để đo mức bất đồng do ngẫu nhiên của LLM.
+  #
+  # VÌ SAO BẮT BUỘC CÓ khi muốn kết luận: nếu graph-vs-none bất đồng ở 3 hotspot
+  # mà graph-vs-graph cũng bất đồng ở 3, thì con số đầu không nói gì về context
+  # -- nó chỉ nói LLM trả lời khác nhau giữa hai lần gọi. Thiếu nhiễu nền là
+  # cách dễ nhất để rút ra một "phát hiện" không tồn tại.
+  noise_floor: false
+  # Giới hạn số hotspot chạy lượt lặp. Mỗi hotspot là một lời gọi LLM nữa.
+  noise_floor_max_hotspots: 10
+
 compiler_loop:
   enabled: true
   # Số lần gọi lại Generator Agent để sửa lỗi biên dịch, TRƯỚC khi bỏ cuộc.

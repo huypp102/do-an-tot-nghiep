@@ -46,3 +46,7 @@ pytest>=7.0        # chạy bộ test GỐC của repo làm oracle mức repo.
 # Cần cho PHA D (build extension Rust cho từng hotspot). Không có thì pipeline
 # vẫn chạy và báo SKIPPED_NO_TOOLCHAIN chứ không sập.
 maturin>=1.0
+
+# BẮT BUỘC cho FuncRank. `networkx.pagerank` dùng scipy cho đường đi nhanh, và
+# ở pilot 1 trên máy thuê thiếu scipy làm Stage 0 hỏng -- đã phải cài tay.
+scipy>=1.10

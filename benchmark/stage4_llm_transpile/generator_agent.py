@@ -28,7 +28,105 @@ GENERATED_DIR = BENCHMARK_ROOT / "versions" / "rust_pure" / "pyo3_ext" / "genera
 
 # VAI TRÒ của agent này. Gửi kèm MỌI lượt gọi, và chỉ agent này dùng --
 # Decision Agent có system prompt hoàn toàn khác (xem decision_agent.py).
-GENERATOR_SYSTEM_PROMPT = """Bạn là lập trình viên Rust/PyO3 chuyên dịch code Python \
+# ---------------------------------------------------------------------------
+# API PYO3 -- KHUÔN MẪU BẮT BUỘC ĐƯA VÀO PROMPT
+#
+# VÌ SAO KHỐI NÀY TỒN TẠI (bằng chứng từ lượt chạy thật đầu tiên, 9 repo):
+# `compiled = 0` ở CẢ 9 repo dù `generated = 1..5`. Nguyên nhân: crate ghim
+# pyo3 0.22 nhưng prompt không hề nói phiên bản, nên model viết theo API 0.1x
+# và `cargo check` trả về:
+#
+#     error[E0599]: no method named `clear` found for reference `&PyList`
+#     error[E0277]: the trait bound `&PyList: PyFunctionArgument<'_, '_>`
+#                   is not satisfied ... `&'a pyo3::Bound<'py, T>`
+#     error[E0599]: no method named `add_function` found for reference
+#                   `&pyo3::types::PyModule`
+#     error[E0277]: the trait bound `&pyo3::types::PyModule:
+#                   WrapPyFunctionArg<'_, _>` is not satisfied
+#
+# PyO3 0.21 đổi sang API `Bound<'py, T>`; mọi tham chiếu trần (`&PyList`,
+# `&PyModule`) không còn dùng được làm tham số `#[pyfunction]`/`#[pymodule]`.
+# Model không thể tự đoán ra điều đó, nên prompt phải DẠY nó -- và phải dạy
+# bằng một ví dụ đầy đủ, không phải bằng vài dòng mô tả.
+#
+# `PYO3_API_VERSION` phải LUÔN khớp `crate_builder.PYO3_VERSION`. Lệch nhau là
+# tái diễn đúng lỗi trên, nên có test tự động chặn:
+# tests/test_pyo3_prompt_matches_version.py
+# ---------------------------------------------------------------------------
+PYO3_API_VERSION = "0.22"
+
+PYO3_API_RULES = """**API PyO3 {pyo3_version} -- BẮT BUỘC ĐÚNG, ĐÂY LÀ LỖI HAY GẶP NHẤT**:
+PyO3 >= 0.21 dùng API `Bound<'py, T>`. Tham chiếu trần kiểu CŨ (`&PyList`, \
+`&PyDict`, `&PyAny`, `&PyModule`) KHÔNG còn biên dịch được -- nó cho \
+`error[E0277]: the trait bound ... PyFunctionArgument is not satisfied`.
+
+- Nhận list/dict/object bất kỳ từ Python: `&Bound<'_, PyList>`, \
+`&Bound<'_, PyDict>`, `&Bound<'_, PyAny>`.
+- Hàm module: `#[pymodule] fn {ext_module}(m: &Bound<'_, PyModule>) -> PyResult<()>` \
+-- KHÔNG có tham số `_py: Python` riêng như bản cũ.
+- `wrap_pyfunction!(ten_ham, m)?` với `m` là `&Bound<'_, PyModule>`.
+- Trên `Bound<'_, PyList>` dùng các method có sẵn: `.len()`, `.get_item(i)?`, \
+`.set_item(i, v)?`, `.append(v)?`, `.insert(i, v)?`, `.del_item(i)?`, `.iter()`.
+- Method KHÔNG có trong danh sách trên (ví dụ `clear`) thì gọi qua \
+`.call_method0("clear")?` / `.call_method1("ten", (arg,))?`. Đừng gọi thẳng \
+`.clear()` -- nó không tồn tại và cho `error[E0599]: no method named `clear``.
+- Lấy giá trị Rust từ phần tử: `let x: f64 = list.get_item(i)?.extract()?;`
+- `use pyo3::prelude::*;` đã mang theo các trait `PyListMethods`, \
+`PyDictMethods`, `PyAnyMethods`, `PyModuleMethods` -- thiếu nó thì mọi method \
+trên đều "không tìm thấy".
+"""
+
+PYO3_EXAMPLE = """**KHUÔN MẪU ĐÚNG cho PyO3 {pyo3_version}** (bám sát khuôn này, chỉ thay \
+tên hàm và phần thân):
+```rust
+use pyo3::prelude::*;
+use pyo3::types::{{PyList, PyModule}};
+
+/// Kiểu gốc vào, kiểu gốc ra: nhận `Vec<f64>` là đủ và đơn giản nhất.
+#[pyfunction]
+fn sum_squares(values: Vec<f64>) -> PyResult<f64> {{
+    Ok(values.iter().map(|v| v * v).sum())
+}}
+
+/// SỬA ĐỐI SỐ TẠI CHỖ: phải nhận `&Bound<'_, PyList>`, không phải `Vec<f64>`
+/// (Vec là bản copy nên bên Python không thấy thay đổi).
+#[pyfunction]
+fn accumulate_inplace(buffer: &Bound<'_, PyList>, addend: f64) -> PyResult<()> {{
+    for i in 0..buffer.len() {{
+        let current: f64 = buffer.get_item(i)?.extract()?;
+        buffer.set_item(i, current + addend)?;
+    }}
+    Ok(())
+}}
+
+/// Method không có sẵn trên Bound<PyList> thì gọi qua call_method0.
+#[pyfunction]
+fn clear_all(items: &Bound<'_, PyList>) -> PyResult<()> {{
+    items.call_method0("clear")?;
+    Ok(())
+}}
+
+#[pymodule]
+fn {ext_module}(m: &Bound<'_, PyModule>) -> PyResult<()> {{
+    m.add_function(wrap_pyfunction!(sum_squares, m)?)?;
+    m.add_function(wrap_pyfunction!(accumulate_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_all, m)?)?;
+    Ok(())
+}}
+```
+"""
+
+
+def pyo3_api_block(ext_module: str) -> str:
+    """Khối quy tắc API + ví dụ mẫu, chèn vào prompt của cả hai tầng."""
+    return (
+        PYO3_API_RULES.format(pyo3_version=PYO3_API_VERSION, ext_module=ext_module)
+        + "\n"
+        + PYO3_EXAMPLE.format(pyo3_version=PYO3_API_VERSION, ext_module=ext_module)
+    )
+
+
+GENERATOR_SYSTEM_PROMPT = f"""Bạn là lập trình viên Rust/PyO3 chuyên dịch code Python \
 hiệu năng cao sang Rust.
 
 VAI TRÒ DUY NHẤT của bạn: SINH và SỬA code Rust.
@@ -38,12 +136,17 @@ VAI TRÒ DUY NHẤT của bạn: SINH và SỬA code Rust.
 
 Nguyên tắc khi viết code:
 1. Giữ NGUYÊN hành vi số học của bản Python gốc.
-2. Hàm expose qua PyO3 bằng `#[pyfunction]`, nhận ảnh xám phẳng `Vec<u8>` \
-(row-major) kèm `width`/`height`, trả về `PyResult<Vec<u8>>`.
-3. Chỉ dùng `std` của Rust và crate `pyo3`, không thêm crate ngoài.
-4. Bỏ mọi lời gọi GUI (cv2.imshow, cv2.waitKey) nếu code gốc có.
-5. Khi được báo lỗi biên dịch, sửa ĐÚNG lỗi đó và trả lại TOÀN BỘ file, \
-không trả patch từng phần."""
+2. Dùng ĐÚNG API PyO3 {PYO3_API_VERSION}, tức API `Bound<'py, T>`. Tham chiếu \
+trần của các bản PyO3 cũ (`&PyList`, `&PyDict`, `&PyModule`) KHÔNG còn biên \
+dịch được. Hàm module là `#[pymodule] fn ten(m: &Bound<'_, PyModule>) -> \
+PyResult<()>`, KHÔNG có tham số `_py: Python` riêng.
+3. Chữ ký hàm bám theo bảng KIỂU QUAN SÁT ĐƯỢC mà prompt cung cấp; không tự \
+đoán và không ép về một quy ước I/O cố định nào.
+4. Chỉ dùng `std` của Rust và crate `pyo3`, không thêm crate ngoài.
+5. Bỏ mọi lời gọi GUI (cv2.imshow, cv2.waitKey) nếu code gốc có.
+6. Khi được báo lỗi biên dịch, đọc KỸ mã lỗi (`error[E0277]`, `error[E0599]`...) \
+cùng đoạn code kèm theo, sửa ĐÚNG lỗi đó rồi trả lại TOÀN BỘ file, không trả \
+patch từng phần."""
 
 PROMPT_TEMPLATE = """**Nhiệm vụ**: Bạn là lập trình viên Rust/PyO3. Hãy dịch hàm Python hotspot \
 `{function_name}` sang Rust để tăng tốc, giữ NGUYÊN hành vi số học của bản Python.
@@ -114,13 +217,17 @@ sự thật, KHÔNG phải type-hint -- hãy tin số liệu này hơn mọi ann
 {hotspot_source}
 ```
 
+{pyo3_api}
 **Ràng buộc bắt buộc**:
 1. Viết MỘT hàm `#[pyfunction]` tên ĐÚNG là `{function_name}`, và MỘT \
 `#[pymodule]` tên ĐÚNG là `{ext_module}` có đăng ký hàm đó.
 2. Chữ ký Rust phải nhận ĐÚNG số đối số và ĐÚNG kiểu như bảng trên, theo ánh \
 xạ: int -> i64, float -> f64, bool -> bool, str -> String, bytes -> Vec<u8>, \
 list[float] -> Vec<f64>, list[int] -> Vec<i64>, dict[str -> int] -> \
-std::collections::HashMap<String, i64>.
+std::collections::HashMap<String, i64>. Nếu cần chính đối tượng Python (để sửa \
+tại chỗ, hoặc kiểu không nằm trong bảng) thì dùng `&Bound<'_, PyList>` / \
+`&Bound<'_, PyDict>` / `&Bound<'_, PyAny>` -- TUYỆT ĐỐI không dùng `&PyList`, \
+`&PyDict`, `&PyAny`.
 3. Trả về `PyResult<T>` với T là kiểu tương ứng giá trị trả về của bản Python. \
 Hàm Python trả `None` thì Rust trả `PyResult<()>`.
 4. Nếu bản Python SỬA ĐỐI SỐ TẠI CHỖ (mutate list truyền vào), nhận \
@@ -153,6 +260,7 @@ mỏng lo việc tháo đối tượng ra và đóng gói kết quả lại.
 {hotspot_source}
 ```
 
+{pyo3_api}
 **Ràng buộc bắt buộc**:
 1. Viết kernel Rust `#[pyfunction]` tên `{function_name}_kernel`, chỉ nhận/trả \
 KIỂU GỐC (số, chuỗi, Vec của số). Kèm `#[pymodule]` tên ĐÚNG là `{ext_module}`.
@@ -269,6 +377,10 @@ def build_signature_prompt(
         hotspot_source=hotspot_source or "(không lấy được source)",
         observed_types=observed_types,
         ext_module=ext_module,
+        # Khối API PyO3 + khuôn mẫu đã đối chiếu. CÓ Ở CẢ HAI NHÁNH ablation --
+        # nó không phải context graph, mà là điều kiện để code biên dịch được.
+        # Thiếu nó thì `compiled = 0` ở mọi nhánh và ablation không so được gì.
+        pyo3_api=pyo3_api_block(ext_module),
     )
 
 

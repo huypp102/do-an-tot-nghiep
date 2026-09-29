@@ -1,4 +1,15 @@
-"""Xuất toàn bộ PCG + PSG + FuncRank (tĩnh/động) + source code từng hàm ra 1
+"""Xuất toàn bộ graph + FuncRank (tĩnh/động) + source code từng hàm ra 1
+file JSON.
+
+BA THỨ KHÁC NHAU, đừng gộp khi đọc file kết quả:
+  * `functions` + `call_edges`   -> PCG (call graph, tĩnh trước, làm giàu
+                                   bằng runtime nếu build_mode=dynamic)
+  * `files` + `import_edges`     -> PSG RÚT GỌN (chỉ quan hệ import giữa file)
+  * `psg_full`                   -> PSG ĐẦY ĐỦ theo POLO Table 1 (class,
+                                   biến toàn cục, kế thừa, sở hữu)
+Xem README mục "Ba khác biệt so với POLO gốc".
+
+(Phần docstring cũ:) Xuất PCG + PSG + FuncRank + source từng hàm ra 1
 file JSON có cấu trúc rõ ràng -- đây là CONTEXT sẽ đưa cho model (qua
 stage4_llm_transpile/model_backend.py) để nó hiểu dependency giữa các hàm/file khi sinh
 code Rust, thay vì chỉ thấy 1 hàm rời rạc.
@@ -66,6 +77,29 @@ def build_context_dict(graph: ProgramGraph) -> dict:
             }
             for e in graph.call_edges
         ],
+        # --- PSG ĐẦY ĐỦ (POLO Table 1) -- xem stage0_graph/psg.py ----------
+        # Tách hẳn khỏi `files`/`import_edges` ở trên (PSG rút gọn, chỉ import).
+        # Xuất ra đây để phân tích hậu kỳ kiểm được, và để prompt của Stage 3
+        # có nguồn duy nhất thay vì tự suy lại từ tên hàm.
+        "psg_full": {
+            "backend": getattr(graph, "psg_backend", ""),
+            "num_classes": len(getattr(graph, "classes", None) or {}),
+            "num_global_vars": len(getattr(graph, "global_vars", None) or {}),
+            "classes": {
+                cid: cls.as_dict()
+                for cid, cls in sorted((getattr(graph, "classes", None) or {}).items())
+            },
+            "global_vars": {
+                gid: var.as_dict()
+                for gid, var in sorted((getattr(graph, "global_vars", None) or {}).items())
+            },
+            "inheritance_edges": [
+                e.as_dict() for e in (getattr(graph, "inheritance_edges", None) or [])
+            ],
+            "ownership_edges": [
+                e.as_dict() for e in (getattr(graph, "ownership_edges", None) or [])
+            ],
+        },
     }
 
 

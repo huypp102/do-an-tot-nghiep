@@ -46,6 +46,10 @@ class FunctionNode:
     calls_raw: list[str] = field(default_factory=list)
     dynamic_time_pct: float | None = None
     dynamic_call_count: int = 0
+    # PHA 4.1: số lời gọi trong thân hàm này mà KHÔNG resolve được thành cạnh
+    # (tên trùng nhiều nơi, không đoán được). Hàm có nhiều lời gọi mù thì
+    # context quanh nó không đáng tin -> hạ confidence_level của chính nó.
+    unresolved_call_count: int = 0
 
 
 @dataclass
@@ -68,6 +72,12 @@ class CallEdge:
     callee: str
     count: int = 0
     time_contribution_pct: float | None = None
+    # PHA 4.1: cạnh này resolve được bằng cách nào.
+    #   "exact"     -- tên gọi khớp DUY NHẤT 1 hàm trong scope, chắc chắn.
+    #   "heuristic" -- tên trùng nhiều nơi, phải đoán bằng "cùng file".
+    # Tỉ lệ 2 loại này là cơ sở tính `graph_confidence`: graph toàn cạnh
+    # heuristic thì mọi kết luận dựa trên nó (kể cả FuncRank) đều yếu.
+    resolution: str = "exact"
 
 
 @dataclass
@@ -101,3 +111,20 @@ class ProgramGraph:
     import_edges: list[tuple[str, str]]
     backend: str  # "tree-sitter" | "ast-fallback"
     build_mode: str = "static"  # "static" | "dynamic"
+
+    # --- PSG ĐẦY ĐỦ (POLO Table 1) -- field RIÊNG, thêm sau -----------------
+    # `files` + `import_edges` ở trên là "PSG rút gọn": chỉ có quan hệ import
+    # giữa các FILE. Bốn field dưới đây mới là đối tác đúng nghĩa của PSG trong
+    # POLO: node Class và Global variable, cạnh kế thừa và cạnh sở hữu.
+    #
+    # Đặt RIÊNG chứ không nhồi vào `files`/`import_edges` vì
+    # `stage3_context_packaging` đang dùng PSG rút gọn và phải chạy y như trước.
+    # Có default nên mọi chỗ đang dựng ProgramGraph bằng 5 tham số cũ vẫn chạy.
+    # Xem stage0_graph/psg.py.
+    # PHA 4.1: chất lượng resolve cạnh PCG -- nguồn của `graph_confidence`.
+    call_resolution: dict = field(default_factory=dict)
+    classes: dict = field(default_factory=dict)             # {id: ClassNode}
+    global_vars: dict = field(default_factory=dict)         # {id: GlobalVarNode}
+    inheritance_edges: list = field(default_factory=list)   # [PsgEdge]
+    ownership_edges: list = field(default_factory=list)     # [PsgEdge]
+    psg_backend: str = ""

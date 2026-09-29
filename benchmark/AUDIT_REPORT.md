@@ -1,6 +1,10 @@
 # AUDIT — Output của pipeline có đủ để so sánh CORRECTNESS và EFFICIENCY chưa?
 
 **Phạm vi audit gốc:** chỉ đọc code + chạy thử với mock/dataset giả, không sửa file nào.
+**Cập nhật 2026-09-29 (4 vòng):** vòng 4 chuẩn bị PILOT 2 -- đưa sửa tay từ pilot 1 vào code, PSG đầy đủ theo POLO Table 1, Decision Gate 3 tầng độc lập, nhiễu nền cho ablation -- xem mục *CHUẨN BỊ CHO PILOT 2* ngay dưới.
+
+**Cập nhật 2026-09-29 (vòng 3):** vòng 3 sửa 3 vấn đề phát hiện từ LƯỢT CHẠY THỰC NGHIỆM ĐẦU TIÊN trên máy thuê (lệch API PyO3, nhãn trạng thái gộp, hàm test chiếm pool) -- xem mục *BA VẤN ĐỀ TỪ LƯỢT CHẠY THỰC NGHIỆM 1 ĐẦU TIÊN* ngay dưới, có trích nguyên văn lỗi `cargo check` thật.
+
 **Cập nhật 2026-09-28 (2 vòng):** vòng 1 thi hành Pha 0→G sửa các lỗ hổng; vòng 2 chuẩn bị Thực nghiệm 1 (chọn hotspot, phễu, VACUOUS, ablation, profile/preflight/scripts) -- xem mục *CHUẨN BỊ THỰC NGHIỆM 1* ngay dưới. Chi tiết vòng 1 — xem mục *TRẠNG THÁI SAU KHI THI HÀNH PHA 0 → G* ngay dưới phần mở đầu.
 **Ngày audit:** 2026-09-28
 **Cặp đánh giá:** Python → Rust, dataset RepoTransBench, 3 phiên bản `python_pure` / `rust_pure` / `hybrid_pyo3`.
@@ -18,6 +22,312 @@ File kết quả đã mở và đối chiếu: `results/pipeline_raw_*_repo_alph
 > **Ghi chú về `summary.json`:** file này KHÔNG tồn tại. Pipeline chỉ sinh `pipeline_raw_<ts>[_<repo>].json`, `pipeline_summary_<ts>[_<repo>].json`, `dataset_summary_<ts>.json`, `graph_context_<ts>.json`. `report_*.md` và `whole_scope_*.json` **chỉ do `stage6_benchmark/bench.py` sinh**, `run_pipeline.py` không sinh (xem lỗ hổng #8).
 
 ---
+
+---
+
+---
+
+---
+
+# CHUẨN BỊ CHO PILOT 2 (Pha 0→6) — 2026-09-29
+
+**23/23 test PASS** (`python tests/run_all.py`, 195s).
+
+## Bảng trạng thái 6 pha
+
+| Pha | Việc | Trạng thái | Bằng chứng |
+|---|---|---|---|
+| **0.1** | `scipy` vào `requirements.txt` | **ĐÃ SỬA** | `networkx.pagerank` cần scipy; pilot 1 phải cài tay trên máy thuê |
+| **0.2** | `gdown` bỏ `--id` | **ĐÃ SỬA** | dòng gọi nay là `gdown "$DATASET_DRIVE_ID" -O "$ZIP"` |
+| **0.3** | subprocess không treo chờ nhập | **ĐÃ SỬA** | `git ls-remote` vào repo không tồn tại **trả về sau 1.8s** (exit 128) thay vì treo |
+| **1** | Cài phụ thuộc test | **ĐÃ SỬA** | tìm 7 tên file + extras `.[test]`/`.[dev]`, cài SAU `requirements.txt` |
+| **2** | Resolve tên trùng | **ĐÃ SỬA** | 3 nhánh ưu tiên; không phân biệt được → cờ `AMBIGUOUS_NAME` |
+| **3** | PSG đầy đủ theo POLO Table 1 | **ĐÃ SỬA** | 2 class, 2 biến toàn cục, 2 chiều cạnh kế thừa, 6 cạnh sở hữu; PSG rút gọn còn nguyên |
+| **4** | Decision Gate 3 tầng | **ĐÃ SỬA** | AND logic, `graph_confidence`, phụ thuộc cấp hàm; `simple_label` tương thích ngược |
+| **5** | Nhiễu nền ablation | **ĐÃ SỬA** | nhánh `graph2`, tự gắn `KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU` |
+| **6** | Test + báo cáo | **ĐÃ XONG** | 23/23 PASS, mục này |
+
+---
+
+## Pha 0.3 — lỗi treo im lặng, đáng viết vào Method
+
+Ở pilot 1, repo `Shpota_github-activity-generator` làm cả lượt chạy dataset **đứng yên**: bộ test của nó gọi `git`, git hỏi username/password, và vì subprocess thừa hưởng stdin của tiến trình cha nên nó chờ nhập mãi. Chạy bằng `nohup` trên máy thuê thì không ai thấy prompt đó — chỉ thấy lượt chạy im lặng không tiến triển tới khi hết giờ.
+
+Hai lớp chặn, vì `stdin` một mình không đủ:
+
+* `stdin=subprocess.DEVNULL` ở **mọi** `subprocess.run` của code sản phẩm (10 file, test tự kiểm số lượng khớp nhau).
+* Biến môi trường trong `build_child_env()`: `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/bin/true`, `SSH_ASKPASS=/bin/true`, `GCM_INTERACTIVE=never`, `PIP_NO_INPUT=1`, `DEBIAN_FRONTEND=noninteractive`. Cần lớp này vì git có đường riêng: nó có thể mở `/dev/tty` hoặc gọi askpass helper, **bỏ qua stdin**.
+
+Đã bổ sung cả `input/intake.py` (`git clone`) — đó thực ra là chỗ rủi ro treo cao nhất mà pilot 1 chưa chạm tới.
+
+Test dùng lệnh **thật**: `git ls-remote https://github.com/khong-ton-tai/x` qua đúng cơ chế đó, và khẳng định nó trả về nhanh (< 55s) với exit code khác 0.
+
+## Pha 2 — tên trùng không còn dùng nhầm âm thầm
+
+Ở pilot 1, `__init__` khớp 4 node và bản cũ **lặng lẽ lấy node đầu tiên**. Nghĩa là đối số ghi từ `A.__init__` có thể bị đem so với bản Rust dịch từ `B.__init__` — sai mà không có dấu hiệu nào trong kết quả.
+
+Ba nhánh ưu tiên trong `_pick_node`:
+
+1. node **cùng file** với nơi hotspot được phát hiện;
+2. `qualified_name` đủ điều kiện phân biệt (`module.ClassName.method`);
+3. hết cách → giữ hành vi cũ (node đầu tiên, sắp theo id cho tất định) **nhưng** gắn `ambiguous_name=True` kèm `ambiguity_detail` liệt kê các node trùng, và ghi thẳng vào `repo_summary_*.json`.
+
+Thông điệp thật khi chạy: *"tên `__init__` khớp 2 node không phân biệt được: `__init__@x.py:1`; `__init__@y.py:1`. Đã dùng node đầu tiên (x.py) — đối số ghi được và bản Rust có thể KHÔNG thuộc cùng một hàm."*
+
+## Pha 3 — PSG đầy đủ, và ba tên gọi không còn lẫn nhau
+
+`stage0_graph/psg.py` thêm node Class (tên, method, lớp cha) và Global variable (tên, nơi gán, có phải `TÊN_HẰNG`), cùng cạnh `superclassOf`/`subclassOf` và `hasmember`/`ismember` — đúng POLO Table 1.
+
+**Đặt field riêng, không ghi đè.** `graph.classes`, `graph.global_vars`, `graph.inheritance_edges`, `graph.ownership_edges`, `graph.psg_backend` — đều có default nên mọi chỗ đang dựng `ProgramGraph` bằng 5 tham số cũ vẫn chạy. `files`/`import_edges` (PSG rút gọn) không bị chạm, vì `stage3_context_packaging` đang dùng chúng. Test khẳng định cả hai cùng còn.
+
+**Lớp cha ngoài scope không bị bỏ.** `class C(unittest.TestCase)` sinh cạnh `subclassOf` với `resolved=False` và giữ nguyên tên `TestCase`. Thông tin "class này kế thừa TestCase" vẫn hữu ích cho prompt, chỉ là nó không trỏ tới node nào trong graph — đoán bừa thì tệ hơn.
+
+**3.3** `packager` thêm `class_detail`: tên class, lớp cha (kèm cờ trong/ngoài scope và method của cha), và tách riêng *method cùng class mà hotspot gọi* với *method cùng class gọi hotspot*. Hai quan hệ đó nói hai điều khác nhau về việc có tách hàm ra được hay không. Hàm cấp module cho `class_detail = None` — không bịa ra.
+
+**3.4** Ba tên gọi được phân biệt rõ trong code, comment và README (mục *Ba khác biệt so với POLO gốc*): **PCG** (call graph, tĩnh trước, làm giàu bằng runtime nếu có) — POLO thì luôn động qua Callgrind; **PSG rút gọn** (chỉ import) — POLO không có khái niệm này; **PSG đầy đủ** — mới là đối tác đúng nghĩa; và `funcrank_static`/`funcrank_dynamic` là khái niệm hệ thống tự thêm, **không map 1-1** vào PCG/PSG của POLO.
+
+## Pha 4 — ba tầng độc lập, không cộng điểm
+
+`stage2_decision_gate/gate3.py`. Ba tầng kiểm **đồng thời bằng AND**; một tầng fail là loại ngay:
+
+| Tầng | Giá trị |
+|---|---|
+| `hotspot_level` | `HIGH` / `MEDIUM` / `LOW_CONFIDENCE` / `LOW` |
+| `feasibility` | `FEASIBLE` / `TEST_ONLY` / `BLOCKED` |
+| `confidence_level` | `HIGH` / `MEDIUM` / `LOW` |
+
+Test khẳng định **không có bù trừ**: `HIGH` + `BLOCKED` + `HIGH` vẫn ra `REJECT_BLOCKED`; `LOW` + `FEASIBLE` + `HIGH` ra `KEEP_PYTHON`.
+
+`LOW_CONFIDENCE` cố ý khác `LOW`. `LOW` = *"đo được và nó không nóng"*; `LOW_CONFIDENCE` = *"chưa đo được nên chưa biết"* → ra `REVIEW`, không phải `KEEP_PYTHON`. Gộp hai thứ đó là mất đúng thông tin cần cho quyết định.
+
+**4.1 `graph_confidence`** (`stage0_graph/confidence.py`), công thức lấy trực tiếp từ code teammate để hai bên so số được với nhau: `edge_quality = exact_ratio + 0.6 * heuristic_ratio`. Để đếm được, `CallEdge` có thêm field `resolution` (`exact` | `heuristic`) và `FunctionNode` có `unresolved_call_count`. Lời gọi ra **ngoài** scope (stdlib, thư viện) không tính vào `unresolved` — nó không nói gì về chất lượng graph. **Nhãn này không loại repo nào**; loại repo vì graph xấu là chọn mẫu theo chất lượng công cụ của chính mình.
+
+**4.2** `funcrank_static` và `funcrank_dynamic` giữ **song song**, cộng `rank_source`. Một hàm static cao + dynamic thấp là hàm được gọi khắp nơi nhưng rẻ — biết được điều đó mới ra quyết định đúng.
+
+**4.3 phụ thuộc cấp HÀM** (`dependency_roots.py`) — sửa đúng lỗi chặn oan. Với file có `import cv2` và `import numpy as np`:
+
+| hàm | roots | blocked |
+|---|---|---|
+| `def add(a,b): return a+b` | `[]` | **False** ← trước đây bị chặn oan |
+| `def blur(i): return cv2.blur(i)` | `['cv2']` | True |
+| `def norm(x): return np.sum(x)` | `['numpy']` | False |
+
+Giới hạn đã biết, ghi ra để không ai tưởng là bug: phân tích tĩnh theo tên nên không bắt `getattr(cv2, "blur")`. Bỏ sót theo chiều **an toàn cho tốc độ** (đánh dấu ít blocked hơn thực tế) — chặn oan là lỗi tệ hơn, vì nó làm mất hẳn hotspot khỏi thực nghiệm.
+
+**`translation_unit`**: `BATCH_CALLER` cho hàm `SELECT` gọi ≥ 10 000 lần mà < 10 µs/lần. Với hàm như vậy, chi phí vượt biên Python↔Rust mỗi lời gọi ăn hết phần tiết kiệm, nên thứ đáng dịch là **vòng lặp gọi**. Gợi ý cho Stage 4, không phải loại bỏ.
+
+**4.5** `simple_label` map `SELECT`/`REVIEW` → `candidate`, `REJECT_BLOCKED` → `skip`, `KEEP_PYTHON` → `suggest_numpy_vectorization`, nên `run_pipeline.py` và `stage3_context_packaging` không phải sửa gì. Chi tiết ba tầng vẫn đủ trong `stages.stage2.gate3` và `graph_context_*.json`.
+
+Chạy thật trên `repo_eta`: chọn đúng 5 hàm sản phẩm `['add','div','mul','sub','sum_list']`, 12 hàm test bị gán `TEST_ONLY`.
+
+## Pha 5 — nhiễu nền
+
+Nhánh thứ ba `graph2`: lượt sinh **độc lập thứ hai của chính nhánh `graph`** (prompt giống từng ký tự, chỉ khác seed), tối đa `noise_floor_max_hotspots=10` hotspot, **không** chạy lại baseline/capture.
+
+Vì sao bắt buộc: nếu graph-vs-none bất đồng ở 3 hotspot mà graph-vs-graph cũng bất đồng ở 3, thì con số đầu không nói gì về context — nó chỉ nói LLM trả lời khác nhau giữa hai lần gọi. Thiếu nhiễu nền là cách dễ nhất để rút ra một "phát hiện" không tồn tại.
+
+Báo cáo đặt hai con số **cạnh nhau** và tự gắn kết luận. Kiểm chứng: nhiễu 2 ≥ hiệu ứng 1 → `KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU`, `conclusive=False`; hiệu ứng 3 > nhiễu 0 → `HIỆU ỨNG VƯỢT NHIỄU`, `conclusive=True`. Chưa chạy `graph2` → `available=False` kèm ghi chú rằng **chưa có cơ sở** kết luận.
+
+`compare_two_arms()` dùng chung cho cả graph-vs-none và graph-vs-graph2 — hai hàm riêng là cách chắc chắn nhất để hai con số lệch nhau theo thời gian.
+
+---
+
+## Chỉ xác nhận được trên máy thuê
+
+**BẮT BUỘC TRƯỚC KHI CHẠY HẾT PILOT 2: mục `pyo3_example_compiles` của `preflight` phải PASS.** Đây là bằng chứng duy nhất cho thấy lỗi PyO3 gốc (làm `compiled=0` ở cả 9 repo pilot 1) đã thật sự hết. **Chưa ai xác nhận bằng `cargo` thật** — máy dev không có Rust toolchain, nên khuôn mẫu trong prompt chỉ được đối chiếu với thông báo lỗi 0.22 và migration guide. Nếu mục đó hỏng thì **dừng ngay**: model bắt chước khuôn mẫu sai sẽ cho `COMPILE_FAILED` hàng loạt y như pilot 1.
+
+Các mục khác:
+
+17. **Phụ thuộc test cài xong có làm bộ test xanh hơn không.** Đã thêm 7 tên file + extras, nhưng chưa biết pilot 1 mất bao nhiêu repo vì lý do này.
+18. **`GIT_ASKPASS=/bin/true` trên Linux thật.** Test chạy trên Windows với Git for Windows; đường askpass của Linux khác. Lệnh `git ls-remote` fail nhanh là dấu hiệu tốt nhưng chưa phải xác nhận trên chính repo `Shpota_github-activity-generator`.
+19. **PSG đầy đủ trên repo thật.** Kiểm trên repo giả (2 class, 2 biến toàn cục). Chưa biết trên repo hàng trăm file thì `_resolve_ownership` khớp được bao nhiêu phần trăm method, và `psg_full` làm `graph_context_*.json` nặng thêm bao nhiêu.
+20. **Gate 3 tầng có chọn ra hotspot khác pilot 1 không.** Với `build_mode: dynamic` của `pilot_linux`, `hotspot_level` sẽ dùng số liệu Scalene thật lần đầu — mọi lượt chạy tới nay đều `static`, nên nhánh `HIGH`/`MEDIUM` theo `direct_runtime_share_pct` chưa bao giờ được thực thi với dữ liệu thật.
+21. **Nhiễu nền có lớn đến mức nào.** Nếu `options.seed` không làm Ollama tất định, nhiễu nền có thể lớn hơn hiệu ứng ở **mọi** chỉ số — và khi đó kết luận đúng của thực nghiệm là *"không đo được tác động của context với cỡ mẫu này"*. Đó là một kết quả hợp lệ, phải báo cáo như vậy chứ không đi tìm cách khác để có số đẹp.
+22. **Chi phí thời gian của nhánh thứ ba.** `graph2` thêm tối đa 10 lời gọi LLM mỗi repo. Với 12 repo, `max_wall_hours=6` có thể không còn đủ.
+
+---
+
+# BA VẤN ĐỀ TỪ LƯỢT CHẠY THỰC NGHIỆM 1 ĐẦU TIÊN — ĐÃ SỬA (2026-09-29)
+
+Lượt chạy đầu tiên trên máy Linux thuê (`run_20260928_150827`, 9 repo RepoTransBench) cho **0 hotspot MEASURED**. Mục này ghi nguyên nhân gốc, bằng chứng, và cách sửa — dùng trích dẫn trực tiếp cho phần Method của luận văn.
+
+**22/22 test PASS** sau khi sửa (`python tests/run_all.py`, 81s).
+
+## Số liệu lượt chạy đầu tiên
+
+| Repo | status cũ | hotspot | replayable | tier | **generated** | **compiled** |
+|---|---|---|---|---|---|---|
+| 7ossam81_EvoloPy | NO_MEASURABLE_HOTSPOT | 30 | 9 | 9 | 3 | **0** |
+| BBuf_onnx_learn | NO_MEASURABLE_HOTSPOT | 23 | 6 | 4 | 4 | **0** |
+| LanceGin_haishoku | NO_MEASURABLE_HOTSPOT | 30 | 11 | 9 | 5 | **0** |
+| OthersideAI_chronology | NO_MEASURABLE_HOTSPOT | 15 | 3 | 3 | 3 | **0** |
+| Shpota_github-activity-generator | NO_MEASURABLE_HOTSPOT | 19 | 5 | 2 | 1 | **0** |
+| TypeError_secure | NO_MEASURABLE_HOTSPOT | 22 | 18 | 16 | 5 | **0** |
+| alastair_python-musicbrainzngs | NO_MEASURABLE_HOTSPOT | 30 | 24 | 22 | 5 | **0** |
+| alingse_jsoncsv | NO_MEASURABLE_HOTSPOT | 21 | 6 | 6 | 5 | **0** |
+| andreroggeri_pynubank | NO_MEASURABLE_HOTSPOT | 29 | 16 | 9 | 5 | **0** |
+
+Đường ống chạy đúng tới bước sinh code ở **cả 9 repo** (31 hotspot có code Rust), rồi **không hotspot nào biên dịch được**. Một nguyên nhân duy nhất, chặn toàn bộ.
+
+---
+
+## VẤN ĐỀ 1 — Lệch phiên bản API PyO3 (**ĐÃ SỬA**)
+
+### Nguyên nhân gốc
+
+Crate sinh tự động ghim `pyo3 = "0.22"`, nhưng prompt **không hề nói phiên bản**, nên Generator Agent viết theo API PyO3 ≤ 0.20:
+
+```rust
+#[pyfunction]
+fn clear_kernel(directives: &PyList) -> PyResult<()> {
+    directives.clear();
+    Ok(())
+}
+
+#[pymodule]
+fn clear_rsext(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(clear_kernel, m)?)?;
+    Ok(())
+}
+```
+
+PyO3 0.21 đã chuyển sang API `Bound<'py, T>`; mọi tham chiếu trần không còn dùng được làm tham số `#[pyfunction]`/`#[pymodule]`.
+
+### Bằng chứng — `cargo check` thật (nguyên văn)
+
+```
+error[E0599]: no method named `clear` found for reference `&PyList` in the current scope
+ --> src/lib.rs:6:16
+  |
+6 |     directives.clear();
+  |                ^^^^^ method not found in `&PyList`
+
+error[E0277]: the trait bound `&PyList: pyo3::impl_::extract_argument::PyFunctionArgument<'_, '_>` is not satisfied
+   --> src/lib.rs:5:29
+    |
+  5 | fn clear_kernel(directives: &PyList) -> PyResult<()> {
+    |                             ^ the trait `PyClass` is not implemented for `&PyList`
+    |
+help: the following other types implement trait `PyFunctionArgument<'a, 'py>`
+ 40 | impl<'a, 'py, T: 'py> PyFunctionArgument<'a, 'py> for &'a Bound<'py, T>
+
+error[E0599]: no method named `add_function` found for reference `&pyo3::types::PyModule`
+error[E0277]: the trait bound `&pyo3::types::PyModule: WrapPyFunctionArg<'_, _>` is not satisfied
+   = help: the following other types implement trait `WrapPyFunctionArg<'py, T>`:
+             &pyo3::Bound<'py, pyo3::types::PyModule>
+```
+
+Chính thông báo lỗi chỉ ra kiểu đúng: `&'a Bound<'py, T>` và `&Bound<'py, PyModule>`.
+
+### Cách sửa
+
+Thêm hằng `PYO3_API_VERSION` cùng **hai khối bắt buộc** vào prompt của cả hai tầng ([generator_agent.py](stage4_llm_transpile/generator_agent.py)):
+
+* `PYO3_API_RULES` — nêu rõ phiên bản, liệt kê kiểu đúng (`&Bound<'_, PyList/PyDict/PyAny>`), chữ ký `#[pymodule] fn ten(m: &Bound<'_, PyModule>) -> PyResult<()>` (không có `_py: Python`), các method có sẵn trên `Bound<PyList>`, và quy tắc dùng `call_method0("clear")` cho method không có sẵn.
+* `PYO3_EXAMPLE` — **khuôn mẫu hoàn chỉnh** gồm ba trường hợp: kiểu gốc vào/ra, sửa đối số tại chỗ qua `&Bound<'_, PyList>`, và gọi method qua `call_method0`.
+
+System prompt cũng bỏ ràng buộc chữ ký ảnh cứng (`Vec<u8>` + width/height) — ràng buộc đó chỉ đúng cho 4 hàm viraj7 ở chế độ legacy, và ở chế độ repo động nó dạy model sai.
+
+Khối này có ở **cả hai nhánh ablation**: nó không phải context graph mà là điều kiện để code biên dịch được. Thiếu nó thì `compiled = 0` ở mọi nhánh và ablation không so được gì.
+
+### Hai lớp chặn tái diễn
+
+**Lớp 1 — test so khớp chuỗi**, chạy được ở máy không có Rust: [tests/test_pyo3_prompt_matches_version.py](tests/test_pyo3_prompt_matches_version.py) assert `crate_builder.PYO3_VERSION == generator_agent.PYO3_API_VERSION`, assert Cargo.toml sinh ra ghim đúng version đó, và quét **các khối ```rust** trong ví dụ mẫu lẫn trong prompt thật để chặn mọi mẫu API cũ. Tôi kiểm test có "răng" bằng hai phép thử âm: đặt lệch version → bắt được; đổi ví dụ mẫu về `&PyModule` + `_py: Python` → bắt được cả hai lỗi ở đúng số dòng.
+
+**Lớp 2 — biên dịch thật trong preflight**: `preflight.check_pyo3_example_compiles()` dựng crate tạm từ chính `PYO3_EXAMPLE` + `CARGO_TOML_TEMPLATE` rồi chạy `cargo check`. Hỏng ở đây thì preflight **dừng lượt chạy** trước lời gọi LLM đầu tiên. Lý do phải có lớp này: nếu chính khuôn mẫu ta đưa vào prompt còn không biên dịch được, không có cơ sở nào để tin code model viết theo nó sẽ biên dịch được. Trên máy dev (không có cargo) mục này tự hạ xuống "bỏ qua, không bắt buộc".
+
+> **Chưa xác nhận được trên máy dev:** khuôn mẫu mới được đối chiếu với chính thông báo lỗi của `cargo check` 0.22 ở trên và với migration guide của PyO3, nhưng **chưa biên dịch thật** vì máy dev không có cargo. `preflight` sẽ tự chứng minh điều đó trên máy thuê ngay bước đầu.
+
+---
+
+## VẤN ĐỀ 1B — Vòng sửa lỗi không nhận được nội dung lỗi (**ĐÃ SỬA**)
+
+### Nguyên nhân gốc
+
+`compile_and_classify()` chạy `cargo check --message-format=json`, nên chẩn đoán đầy đủ nằm trong field `rendered` của các message JSON trên **stdout**. Nhưng code cũ ưu tiên stderr:
+
+```python
+human = (proc.stderr or "").strip() or "\n".join(rendered)
+```
+
+Với `--message-format=json`, stderr chỉ còn **một dòng tóm tắt**:
+
+```
+error: could not compile `clear_rsext` (lib) due to 4 previous errors
+```
+
+Dòng đó là toàn bộ nội dung `{compiler_output}` mà `FIX_PROMPT_TEMPLATE` đưa cho Generator Agent, kèm yêu cầu *"Sửa ĐÚNG các lỗi trên"*. Agent được bảo sửa lỗi mà **không hề biết lỗi là gì**. Đó là lý do vòng sửa lỗi ở lượt chạy đầu không sửa được gì — nó không hỏng, nó bị bỏ đói thông tin.
+
+### Cách sửa
+
+Ưu tiên bản render từ stdout JSON, nối thêm stderr chỉ khi nó thêm thông tin mới, và nếu cả hai đều rỗng thì nói rõ thay vì đưa chuỗi rỗng vào prompt.
+
+### Bằng chứng sau khi sửa
+
+Test dùng lại **nguyên văn** lỗi E0599/E0277 ở trên, đóng gói theo định dạng JSON của cargo, với stderr chỉ có dòng tóm tắt. `compiler_output` giờ dài 562 ký tự và chứa: mã `error[E0599]`, mã `error[E0277]`, đoạn code `directives.clear();`, gợi ý `PyFunctionArgument`, **và** vẫn giữ dòng tóm tắt. Mã lỗi parse ra `['E0277', 'E0599']`, phân loại `TYPE_ERROR`.
+
+---
+
+## VẤN ĐỀ 2 — Một nhãn cho hai nguyên nhân khác nhau (**ĐÃ SỬA**)
+
+Cả 9 repo nhận `NO_MEASURABLE_HOTSPOT`, nhãn đó đọc ra là *"không tìm được hotspot nào"* — sai hoàn toàn nguyên nhân. Thực tế đường ống chạy tốt tới bước sinh code; chỗ vỡ là prompt.
+
+Thêm `outcomes.ALL_HOTSPOTS_FAILED_COMPILE`, gán khi `funnel.counts.generated > 0` **và** `funnel.counts.compiled == 0`. `NO_MEASURABLE_HOTSPOT` giữ nguyên nghĩa hẹp: rụng **trước** bước sinh code.
+
+Phân biệt này quan trọng vì **cách sửa hoàn toàn khác nhau**: `NO_MEASURABLE_HOTSPOT` là vấn đề của khâu ghi/phát lại đối số hoặc phân tầng kiểu; `ALL_HOTSPOTS_FAILED_COMPILE` là vấn đề của prompt hoặc model.
+
+Đã cập nhật: `REPO_STATUSES`, `decide_repo_status()` (nhận thêm `n_generated`/`n_compiled`), chú giải bảng tổng kết trong `report.build_repo_table()`, mô tả quy tắc chọn mẫu và `evaluate_candidate()` trong `run_experiment1.py`. Phễu giờ được dựng **trước** khi chốt status vì status cần số liệu của phễu.
+
+Lỗi mức môi trường vẫn **thắng** nhãn mới: `BASELINE_FAILED`/`INSTALL_FAILED`/`TIMEOUT` được kiểm trước. Và `is_success()` không coi nhãn mới là thành công.
+
+Kiểm chứng đầu-cuối trên `repo_eta` với cargo giả luôn trả lỗi API cũ: phễu `generated=5, compiled=0` → `repo_status = ALL_HOTSPOTS_FAILED_COMPILE`, exit code 2, và `detail` của từng hotspot mang mã lỗi thật `E0277`.
+
+---
+
+## VẤN ĐỀ 3 — Hàm test chiếm chỗ trong candidate_pool (**ĐÃ SỬA**)
+
+### Bằng chứng định lượng
+
+| Repo | pool | hàm test | % |
+|---|---|---|---|
+| BBuf_onnx_learn | 23 | 14 | **60%** |
+| Shpota_github-activity-generator | 19 | 10 | **52%** |
+| OthersideAI_chronology | 15 | 6 | **40%** |
+| LanceGin_haishoku | 30 | 11 | **36%** |
+| **Tổng 9 repo** | **219** | **41** | **18%** |
+
+`BBuf_onnx_learn` có `funcrank_order` là `['div', 'mul', 'sub', 'identity', 'multiply', 'add', 'make_identity', 'sum_list', 'dummy_resize_func', 'test_placeholder', 'test_make_identity', ...]` — 14 tên `test_*`. Chúng nằm **cùng file** `tools/tool.py` với code sản phẩm, nên lọc theo đường dẫn `tests/` là không đủ.
+
+Dịch hàm test sang Rust là vô nghĩa: nó không nằm trong đường chạy của người dùng, và nếu thay nó bằng Rust thì đổi luôn chính **oracle** của thí nghiệm.
+
+### Cách sửa
+
+[stage0_graph/test_filter.py](stage0_graph/test_filter.py), ba tiêu chí (khớp một là đủ): (a) đường dẫn trong `tests/`, `public_tests/`, `test/`, `spec/`; (b) tên khớp `test_*`, `*_test`, `setUp*`, `tearDown*`, `setup_method`...; (c) file import `pytest`/`unittest` **và** hàm không được file khác gọi — điều kiện thứ hai quan trọng, vì module sản phẩm có thể import pytest mà hàm của nó vẫn là code thật nếu nơi khác gọi tới.
+
+Lọc áp dụng **trước khi xếp hạng**, qua tham số `exclude_ids` mới của `rank.top_k_functions()`. Hai quyết định thiết kế:
+
+* **Không xoá node khỏi graph.** Stage 3 vẫn cần biết "hàm test nào gọi hotspot" làm context, và ví dụ vào/ra cũng lấy từ lời gọi của test. Chỉ danh sách ứng viên bị lọc.
+* **Điểm FuncRank vẫn tính trên graph đầy đủ**, nên công thức không đổi — chỉ danh sách được chọn đổi.
+
+Số liệu lọc ghi vào `stages.stage0.test_filter` (số hàm bị loại, tỉ lệ, phân loại theo lý do, danh sách tên) để kiểm được từ file kết quả.
+
+### Bằng chứng sau khi sửa
+
+`repo_eta` (fixture mô phỏng đúng `BBuf_onnx_learn`: hàm test cùng file với code sản phẩm, cộng một `tests/` riêng): 19 hàm → loại **14 (73.7%)**, pool còn đúng 5 hàm sản phẩm `['add', 'div', 'mul', 'sub', 'sum_list']`. Không hàm test nào lọt, không hàm sản phẩm nào bị loại oan, graph không bị sửa.
+
+---
+
+## Lỗi phụ phát hiện khi kiểm chứng
+
+`tests/test_confounded.py` ghim `num_ctx=550`, con số calibrate theo độ dài prompt **cũ** (graph 620 / none 486 token). Khối hướng dẫn API PyO3 làm cả hai prompt vượt 550 nên cả hai bị cắt, và test fail vì lý do chẳng liên quan tới CONFOUNDED. Đã sửa để **tính ngưỡng động** từ chính hai prompt (giờ graph 1227 / none 1186 → `num_ctx=1206`), nên prompt đổi thì ngưỡng tự đổi theo.
+
+---
+
+## Bổ sung vào mục "chỉ xác nhận được trên máy thuê"
+
+14. **Khuôn mẫu PyO3 mới có biên dịch được thật hay không.** Đã đối chiếu với thông báo lỗi 0.22 và migration guide, nhưng máy dev không có cargo. `preflight.check_pyo3_example_compiles()` là phép kiểm quyết định — **nếu mục này hỏng thì đừng chạy thực nghiệm**, vì model bắt chước khuôn mẫu sai sẽ cho `COMPILE_FAILED` hàng loạt như lượt trước.
+15. **Vòng sửa lỗi có thật sự sửa được khi đã có chẩn đoán đầy đủ.** Nay agent nhận đủ mã lỗi + đoạn code + gợi ý, nhưng còn phải xem `DSR@1` thật là bao nhiêu.
+16. **Tỉ lệ hotspot đi tới bước đo sau khi lọc hàm test.** Pool sạch hơn 18% chỗ, nhưng chưa biết điều đó chuyển thành bao nhiêu hotspot `MEASURED` thêm.
 
 ---
 

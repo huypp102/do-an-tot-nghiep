@@ -578,6 +578,85 @@ mới thêm sau này cũng tự động bị lọc.
 Venv của repo bị xoá sau mỗi repo (`keep_venv: false`). Chạy cả dataset mà giữ
 lại venv sẽ làm đầy đĩa máy thuê rất nhanh.
 
+## Ba khác biệt so với POLO gốc
+
+Hệ thống này lấy ý tưởng PCG/PSG/FuncRank từ POLO (Bai et al., IJCAI-25), nhưng **không phải bản hiện thực 1-1**. Ba chỗ khác nhau dưới đây phải nêu trong luận văn, nếu không người đọc sẽ hiểu sai là đã tái lập nguyên vẹn POLO.
+
+### (a) PCG ở đây là tĩnh trước, làm giàu bằng runtime — POLO thì luôn động
+
+POLO dựng PCG **hoàn toàn từ runtime** bằng Callgrind: mỗi cạnh gọi hàm đều có số lần gọi và thời gian thật.
+
+Ở đây PCG được dựng **tĩnh trước** bằng tree-sitter (`functions` + `call_edges`, `count=0`, `time_contribution_pct=None`), rồi mới **làm giàu** bằng số liệu Scalene khi `graph.build_mode = dynamic`. Hàm nào không được thực thi trong lượt profiling thì giữ điểm tĩnh, `rank_source = "static_fallback"`.
+
+Lý do và hệ quả:
+
+* Callgrind không chạy được trên Windows và rất chậm; Scalene là công cụ đã chốt cho Stage 1.
+* Đổi lại, cạnh PCG ở chế độ `static` chỉ nói **có** quan hệ gọi hàm, không nói tần suất. Vì vậy phải có `graph_confidence` (xem dưới) để biết kết luận dựa trên graph đó đáng tin đến đâu.
+* POLO Section 3.2 cũng nêu đúng lý do cần bổ sung phân tích tĩnh: runtime không phủ hết mọi code path.
+
+### (b) Có HAI loại PSG, và chúng khác nhau
+
+| | PSG **rút gọn** | PSG **đầy đủ** |
+|---|---|---|
+| Field | `graph.files`, `graph.import_edges` | `graph.classes`, `graph.global_vars`, `graph.inheritance_edges`, `graph.ownership_edges` |
+| Nội dung | chỉ quan hệ **import giữa các file** | node Class, node Global variable; cạnh `superclassOf`/`subclassOf`, `hasmember`/`ismember` |
+| Tương ứng POLO | **không** — POLO Table 1 không có khái niệm này | có, đây mới là PSG đúng nghĩa |
+| Code | `stage0_graph/builder.py` | `stage0_graph/psg.py` |
+
+Vì sao giữ cả hai thay vì thay thế: PSG rút gọn đang được `stage3_context_packaging` dùng và đã chạy được. Ghi đè nó là cách nhanh nhất để phá phần đang hoạt động, nên PSG đầy đủ được thêm vào **field riêng**. Cả hai đều xuất ra `graph_context_*.json`: PSG rút gọn ở `files`/`import_edges`, PSG đầy đủ ở khoá `psg_full`.
+
+Trong code và comment, ba thứ được gọi đúng tên: *"PCG (call graph, tĩnh trước, làm giàu bằng runtime nếu có)"*, *"PSG rút gọn (chỉ import)"*, *"PSG đầy đủ (POLO Table 1)"*.
+
+### (c) `funcrank_static` / `funcrank_dynamic` là khái niệm hệ thống tự thêm
+
+POLO có **một** FuncRank, tính trên PCG runtime theo Eq.1-2. Ở đây có **hai** con số, giữ song song, không gộp:
+
+* `funcrank_static` — PageRank thuần trên cấu trúc gọi hàm. Trả lời: *hàm này có nằm ở vị trí trung tâm không?*
+* `funcrank_dynamic` — Eq.1-2 của POLO (α=0.5) trên số liệu Scalene. Trả lời: *hàm này có thật sự tốn thời gian không?*
+
+Chúng **không map 1-1 vào PCG/PSG của POLO** — đó là cách hệ thống này xử lý việc PCG có thể thiếu dữ liệu runtime. Cố ý không gộp thành một `effective_funcrank` rồi bỏ một cái: một hàm static cao + dynamic thấp là hàm được gọi khắp nơi nhưng rẻ, và biết được điều đó mới ra quyết định đúng. `rank_source` ghi rõ con số nào đang được dùng.
+
+### Hệ quả: `graph_confidence`
+
+Vì PCG có thể là tĩnh và cạnh có thể phải đoán, mỗi repo được gắn một mức tin cậy:
+
+```
+edge_quality = exact_ratio + 0.6 * heuristic_ratio
+
+unresolved <= 15% và edge_quality >= 0.70  ->  HIGH
+unresolved <= 40% và edge_quality >= 0.40  ->  MEDIUM
+còn lại                                    ->  LOW
+không có hàm nào                           ->  OUT_OF_SCOPE
+```
+
+`exact` = tên gọi khớp duy nhất một hàm trong scope; `heuristic` = tên trùng nhiều nơi, phải đoán bằng "cùng file"; `unresolved` = không đoán được. Cạnh đoán tính 60% giá trị cạnh chắc chắn.
+
+Nhãn này **không loại repo nào khỏi thực nghiệm** — loại repo vì graph xấu là chọn mẫu theo chất lượng công cụ của chính mình. Nó chỉ đi vào tầng `confidence_level` của Decision Gate và vào báo cáo.
+
+## Decision Gate: ba tầng độc lập
+
+`stage2_decision_gate/gate3.py` kiểm **ba** câu hỏi riêng biệt, bằng AND — một tầng fail là loại ngay, không có chuyện mặt tốt bù cho mặt hỏng:
+
+| Tầng | Câu hỏi | Giá trị |
+|---|---|---|
+| `hotspot_level` | hàm này có **nóng** không? | `HIGH` / `MEDIUM` / `LOW_CONFIDENCE` / `LOW` |
+| `feasibility` | dịch sang Rust có **khả thi** không? | `FEASIBLE` / `TEST_ONLY` / `BLOCKED` |
+| `confidence_level` | ta có **tin** được hai kết luận trên không? | `HIGH` / `MEDIUM` / `LOW` |
+
+`LOW_CONFIDENCE` cố ý khác `LOW`: `LOW` nghĩa là *"đo được và nó không nóng"*, `LOW_CONFIDENCE` nghĩa là *"chưa đo được nên chưa biết"*. Gộp hai thứ đó là mất đúng thông tin cần cho quyết định.
+
+Quyết định cuối: `SELECT` / `REVIEW` / `KEEP_PYTHON` / `REJECT_BLOCKED`. Và `simple_label` map về 3 nhãn cũ (`candidate` / `suggest_numpy_vectorization` / `skip`) nên phần còn lại của pipeline không phải sửa gì; chi tiết ba tầng vẫn giữ đủ trong `stages.stage2.gate3` và trong `graph_context_*.json`.
+
+**`feasibility` xét phụ thuộc ở cấp HÀM, không cấp file.** Một dòng `import cv2` ở đầu file trước đây làm *mọi* hàm trong file bị đánh dấu blocked, kể cả hàm chỉ cộng hai số. Nay `stage2_decision_gate/dependency_roots.py` lấy source của chính hàm đó, tìm mọi tên được dùng trong thân hàm, rồi chỉ tính import nào có tên khớp là phụ thuộc thật.
+
+**`translation_unit`** gắn `BATCH_CALLER` cho hàm `SELECT` được gọi ≥ 10 000 lần mà < 10 µs/lần: với hàm như vậy, chi phí vượt biên Python↔Rust mỗi lời gọi sẽ ăn hết phần tiết kiệm, nên thứ đáng dịch là **vòng lặp gọi** nó, không phải bản thân hàm. Đây là gợi ý cho Stage 4, không phải loại bỏ.
+
+## Nhiễu nền của ablation
+
+`ablation.noise_floor: true` chạy thêm một lượt sinh **độc lập thứ hai của chính nhánh `graph`** (cùng prompt từng ký tự, chỉ khác seed), tối đa `noise_floor_max_hotspots` hotspot. Baseline và bước ghi đối số **không** chạy lại.
+
+Vì sao bắt buộc phải có trước khi kết luận: nếu graph-vs-none bất đồng ở 3 hotspot mà graph-vs-graph cũng bất đồng ở 3, thì con số đầu không nói gì về context — nó chỉ nói LLM trả lời khác nhau giữa hai lần gọi. Báo cáo đặt hai con số cạnh nhau và tự gắn `KHÔNG PHÂN BIỆT ĐƯỢC VỚI NHIỄU` khi hiệu ứng không vượt nhiễu.
+
 ## 3 cấp độ benchmark (function / file / repo)
 
 Chọn qua `target.mode` trong `config.yaml`, theo đúng kiến trúc Stage 0 của

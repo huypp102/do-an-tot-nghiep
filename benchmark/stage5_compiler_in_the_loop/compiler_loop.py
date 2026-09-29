@@ -80,7 +80,10 @@ class CompileResult:
     error_class: str = OTHER
     error_codes: list[str] = field(default_factory=list)
     n_errors: int = 0
-    output: str = ""          # stderr đã rút gọn, đưa vào prompt sửa lỗi
+    # Chẩn đoán ĐẦY ĐỦ (mã lỗi + đoạn code + gợi ý sửa) lấy từ field `rendered`
+    # của stdout JSON, KHÔNG phải dòng tóm tắt ở stderr -- đây là nội dung đưa
+    # vào prompt sửa lỗi, nên thiếu chi tiết là vòng sửa lỗi vô dụng.
+    output: str = ""
     skipped: bool = False     # True khi không có cargo -> không kết luận được
     skip_reason: str = ""
 
@@ -168,7 +171,8 @@ def compile_and_classify(
     logger.info("Stage 5: chạy `cargo check` tại %s ...", crate_dir)
     try:
         proc = subprocess.run(
-            cmd, cwd=str(crate_dir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec
+            cmd, cwd=str(crate_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec
         )
     except subprocess.TimeoutExpired:
         return CompileResult(
@@ -185,8 +189,34 @@ def compile_and_classify(
         return CompileResult(ok=True, n_errors=0)
 
     codes, n_errors, rendered = _extract_json_diagnostics(proc.stdout)
-    # stderr chứa bản render người đọc được; nếu trống thì dùng bản từ JSON.
-    human = (proc.stderr or "").strip() or "\n".join(rendered)
+
+    # ƯU TIÊN BẢN RENDER TỪ STDOUT JSON, KHÔNG phải stderr.
+    #
+    # Với `--message-format=json`, toàn bộ chẩn đoán đầy đủ (mã lỗi, đoạn code
+    # gây lỗi, gợi ý sửa) nằm trong field `rendered` của các message JSON trên
+    # STDOUT. stderr chỉ còn dòng tóm tắt kiểu
+    #     error: could not compile `clear_rsext` (lib) due to 4 previous errors
+    # Bản cũ ưu tiên stderr nếu nó không rỗng, nên `compiler_output` đưa vào
+    # FIX_PROMPT_TEMPLATE chỉ là dòng tóm tắt đó -- Generator Agent được yêu
+    # cầu "sửa ĐÚNG các lỗi trên" mà không hề biết lỗi là gì. Đó là lý do vòng
+    # sửa lỗi ở lượt chạy thật đầu tiên không sửa được gì.
+    #
+    # Nối thêm stderr ở cuối để giữ dòng tóm tắt (đôi khi có thông tin về
+    # feature/link không nằm trong JSON), nhưng chỉ khi nó thật sự thêm gì mới.
+    human_parts: list[str] = []
+    if rendered:
+        human_parts.append("\n".join(rendered).strip())
+    stderr_text = (proc.stderr or "").strip()
+    if stderr_text and stderr_text not in "\n".join(human_parts):
+        human_parts.append(stderr_text)
+    human = "\n".join(p for p in human_parts if p)
+    if not human:
+        # Không parse được gì từ stdout VÀ stderr rỗng -> vẫn phải nói rõ chứ
+        # không đưa chuỗi rỗng vào prompt sửa lỗi.
+        human = (
+            f"`cargo check` thất bại (exit={proc.returncode}) nhưng không đọc "
+            f"được chẩn đoán nào từ stdout JSON lẫn stderr."
+        )
     error_class = classify_error(human, codes)
 
     logger.warning(

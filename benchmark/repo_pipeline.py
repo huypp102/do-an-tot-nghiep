@@ -62,9 +62,21 @@ class HotspotRecord:
     reason: str = ""
     detail: str = ""
     gate_label: str = ""
+    # PHA 4.4: ba tầng gate giữ RIÊNG, không gộp thành một điểm số. `gate_label`
+    # ở trên chỉ là bản map 3 nhãn cũ cho tương thích ngược.
+    gate_decision: str = ""          # SELECT | REVIEW | KEEP_PYTHON | REJECT_BLOCKED
+    gate_hotspot_level: str = ""
+    gate_feasibility: str = ""
+    gate_confidence_level: str = ""
+    translation_unit: str = ""       # FUNCTION | BATCH_CALLER
     tier: str = ""
     tier_reason: str = ""
     module_target: str = ""
+    # PHA 2: tên hotspot khớp nhiều node mà không phân biệt được -> đối số ghi
+    # được và bản Rust có thể không thuộc cùng một hàm. Phải lộ ra trong kết quả.
+    ambiguous_name: bool = False
+    ambiguity_detail: str = ""
+    n_name_matches: int = 1
     n_captured_calls: int = 0
     observed_arg_types: list[str] = field(default_factory=list)
     observed_kwarg_types: dict = field(default_factory=dict)
@@ -118,9 +130,17 @@ class HotspotRecord:
             "reason_help": outcomes.REASON_HELP.get(self.reason or outcomes.MEASURED, ""),
             "detail": self.detail,
             "gate_label": self.gate_label,
+            "gate_decision": self.gate_decision,
+            "gate_hotspot_level": self.gate_hotspot_level,
+            "gate_feasibility": self.gate_feasibility,
+            "gate_confidence_level": self.gate_confidence_level,
+            "translation_unit": self.translation_unit,
             "tier": self.tier,
             "tier_reason": self.tier_reason,
             "module_target": self.module_target,
+            "ambiguous_name": self.ambiguous_name,
+            "ambiguity_detail": self.ambiguity_detail,
+            "n_name_matches": self.n_name_matches,
             "n_captured_calls": self.n_captured_calls,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
@@ -282,8 +302,22 @@ def _run_after_install(
     # `top_k_translate` hotspot ĐẦU TIÊN theo đúng thứ tự đó.
     pool_size = int(graph_cfg.get("candidate_pool", 30))
     build_mode = str(graph_cfg.get("build_mode", "static"))
+
+    # LỌC HÀM TEST TRƯỚC KHI XẾP HẠNG. Trên lượt chạy thật, 18% chỗ trong pool
+    # bị hàm test chiếm (BBuf_onnx_learn: 14/23 = 60%). Dịch hàm test sang Rust
+    # là vô nghĩa, và thay nó bằng Rust thì đổi luôn chính ORACLE của ta.
+    from stage0_graph.test_filter import exclude_test_functions
+
+    excluded_ids, test_filter_stats = exclude_test_functions(graph)
+
+    from stage0_graph.confidence import compute_graph_confidence
+
+    graph_confidence = compute_graph_confidence(graph)
+
     functions = list(dict.fromkeys(
-        fn.name for fn, _s in top_k_functions(graph, pool_size, build_mode=build_mode)
+        fn.name for fn, _s in top_k_functions(
+            graph, pool_size, build_mode=build_mode, exclude_ids=excluded_ids
+        )
     ))
     if not functions:
         return finish(outcomes.NO_MEASURABLE_HOTSPOT, "FuncRank không chọn được hotspot nào")
@@ -300,6 +334,20 @@ def _run_after_install(
         "build_mode": build_mode,
         "funcrank_order": funcrank_order,
         "functions": functions,
+        "test_filter": test_filter_stats,
+        # PHA 4.1: graph này đáng tin đến đâu. KHÔNG dùng để loại repo, chỉ để
+        # đọc kèm mọi kết luận dựa trên graph.
+        "graph_confidence": graph_confidence,
+        "call_resolution": dict(getattr(graph, "call_resolution", None) or {}),
+        # PHA 3: PSG ĐẦY ĐỦ (class/biến toàn cục/kế thừa/sở hữu). Khác hẳn
+        # `import_edges` ở PSG rút gọn -- xem stage0_graph/psg.py.
+        "psg_full": {
+            "backend": getattr(graph, "psg_backend", ""),
+            "n_classes": len(getattr(graph, "classes", None) or {}),
+            "n_global_vars": len(getattr(graph, "global_vars", None) or {}),
+            "n_inheritance_edges": len(getattr(graph, "inheritance_edges", None) or []),
+            "n_ownership_edges": len(getattr(graph, "ownership_edges", None) or []),
+        },
     }
     for name in functions:
         records[name] = HotspotRecord(function_name=name)
@@ -307,24 +355,46 @@ def _run_after_install(
     # ------------------------------------------------------------ STAGE 2
     gate_enabled = bool((cfg.get("decision_gate") or {}).get("enabled", True))
     if gate_enabled:
-        _banner("STAGE 2", "Decision Gate -- skip / vectorize / candidate")
-        from stage2_decision_gate.gate import LABEL_CANDIDATE, classify_functions
+        _banner("STAGE 2", "Decision Gate 3 TẦNG -- hotspot / feasibility / confidence")
+        from stage2_decision_gate.gate import LABEL_CANDIDATE
+        from stage2_decision_gate.gate3 import evaluate_functions, summarize
 
-        labels = classify_functions(graph, functions)
-        for name, lab in labels.items():
-            if name in records:
-                records[name].gate_label = lab
-                if lab != LABEL_CANDIDATE:
-                    records[name].set_reason(
-                        outcomes.GATE_SKIPPED,
-                        f"Decision Gate gán nhãn '{lab}' -- cố ý không dịch sang Rust",
-                    )
+        graph_conf = graph_confidence   # đã tính ở Stage 0, không tính lại
+        verdicts = evaluate_functions(
+            graph, functions, profile=getattr(graph, "_dynamic_profile", None)
+        )
+        # `simple_label` map 4 quyết định -> 3 nhãn CŨ, nên phần còn lại của
+        # pipeline không phải sửa gì (PHA 4.5). Chi tiết 3 tầng vẫn được giữ
+        # đủ trong `stages.stage2.gate3`.
+        labels = {name: v.as_dict()["simple_label"] for name, v in verdicts.items()}
+        for name, v in verdicts.items():
+            if name not in records:
+                continue
+            rec = records[name]
+            rec.gate_label = labels[name]
+            rec.gate_decision = v.decision
+            rec.gate_hotspot_level = v.hotspot_level
+            rec.gate_feasibility = v.feasibility
+            rec.gate_confidence_level = v.confidence_level
+            rec.translation_unit = v.translation_unit
+            if labels[name] != LABEL_CANDIDATE:
+                rec.set_reason(
+                    outcomes.GATE_SKIPPED,
+                    f"Gate: {v.decision} (hotspot={v.hotspot_level}, "
+                    f"feasibility={v.feasibility}, confidence={v.confidence_level}) "
+                    f"-- {v.decision_reason}",
+                )
         candidates = [n for n in functions if labels.get(n) == LABEL_CANDIDATE]
+        summary["stages"]["stage2"] = {
+            "labels": labels,
+            "candidates": candidates,
+            "gate3": summarize(verdicts, graph_conf),
+        }
     else:
         labels = {}
         candidates = list(functions)
         logger.info("STAGE 2 | Decision Gate TẮT -- mọi hotspot là candidate.")
-    summary["stages"]["stage2"] = {"labels": labels, "candidates": candidates}
+        summary["stages"]["stage2"] = {"labels": labels, "candidates": candidates}
 
     # ------------------------------------------------------- PHA B (specs)
     _banner("PHA B", "Đổi đường dẫn file -> module:qualname")
@@ -332,8 +402,21 @@ def _run_after_install(
     for name, why in unresolved.items():
         if name in records:
             records[name].set_reason(outcomes.UNRESOLVABLE_IMPORT, why)
+    n_ambiguous = 0
     for spec in specs:
-        records[spec.function_name].module_target = spec.target
+        rec = records[spec.function_name]
+        rec.module_target = spec.target
+        rec.ambiguous_name = spec.ambiguous_name
+        rec.ambiguity_detail = spec.ambiguity_detail
+        rec.n_name_matches = spec.n_name_matches
+        if spec.ambiguous_name:
+            n_ambiguous += 1
+    if n_ambiguous:
+        logger.warning(
+            "PHA 2 | %d/%d hotspot có tên TRÙNG không phân biệt được "
+            "(AMBIGUOUS_NAME) -- số liệu của chúng cần đọc kèm cảnh báo.",
+            n_ambiguous, len(specs),
+        )
     if not specs:
         return finish(outcomes.NO_MEASURABLE_HOTSPOT,
                       "không hotspot nào đổi được thành module:qualname")
@@ -494,6 +577,27 @@ def _run_after_install(
             r.arm = arm
         arm_summary: dict = {"stages": {}}
 
+        # --- PHA 5: nhánh NHIỄU NỀN chỉ chạy trên tối đa N hotspot ---------
+        # Mỗi hotspot là một lời gọi LLM nữa; chạy hết cả dataset sẽ nhân đôi
+        # hoá đơn GPU để đo một thứ (mức nhiễu) mà vài hotspot là đủ.
+        arm_eligible = eligible
+        if arm == ab.ARM_GRAPH_REPEAT:
+            limit = ab.noise_floor_max_hotspots(cfg)
+            arm_eligible = eligible[:limit]
+            logger.info(
+                "PHA 5 | nhánh nhiễu nền '%s': chạy lại %d/%d hotspot (giới hạn "
+                "noise_floor_max_hotspots=%d). KHÔNG chạy lại baseline/capture.",
+                arm, len(arm_eligible), len(eligible), limit,
+            )
+            arm_summary["stages"]["noise_floor"] = {
+                "n_hotspots": len(arm_eligible),
+                "limit": limit,
+                "note": (
+                    "Lượt sinh ĐỘC LẬP thứ hai của CHÍNH nhánh graph: cùng prompt, "
+                    "seed khác. Dùng để đo mức bất đồng do ngẫu nhiên của LLM."
+                ),
+            }
+
         if arm:
             _banner("ABLATION", f"NHÁNH '{arm}' (context graph: "
                                 f"{'CÓ' if ab.includes_graph_context(arm) else 'KHÔNG'})")
@@ -503,7 +607,8 @@ def _run_after_install(
             # nhánh sau sẽ import trúng .so của nhánh trước và kết quả so sánh
             # thành vô nghĩa.
             removed = repo_runner.uninstall_extensions(
-                venv_py, [crate_builder.ext_module_name(s.function_name) for s in eligible]
+                venv_py,
+                [crate_builder.ext_module_name(s.function_name) for s in eligible]
                 + [crate_builder.shim_module_name(s.function_name) for s in eligible],
                 work_dir,
             )
@@ -529,7 +634,7 @@ def _run_after_install(
             )
 
         out = _run_one_arm(
-            cfg=cfg, arm=arm, eligible=eligible, records=arm_records, graph=graph,
+            cfg=cfg, arm=arm, eligible=arm_eligible, records=arm_records, graph=graph,
             benchmark_root=benchmark_root, work_dir=work_dir, venv_py=venv_py,
             capture_dir=capture_dir, verdicts=verdicts, baseline=baseline,
             ro_cfg=ro_cfg, rtol=rtol, atol=atol, warmup=warmup,
@@ -568,15 +673,21 @@ def _run_after_install(
     for rec in records.values():
         if not rec.reason:
             rec.reason = outcomes.MEASURED
-    reasons = [r.reason for r in records.values()]
-    status = outcomes.decide_repo_status(reasons)
-    summary["metrics"] = _repo_metrics(records, baseline, hybrid_tests)
-
     # --- PHẦN 1.2: phễu của repo này, mỗi bước có mẫu số rõ ---
+    # Dựng phễu TRƯỚC khi chốt status: status cần biết đã sinh được code chưa
+    # để phân biệt ALL_HOTSPOTS_FAILED_COMPILE với NO_MEASURABLE_HOTSPOT.
     import funnel as funnel_mod
 
     rf = funnel_mod.build_repo_funnel(label, baseline.ok and baseline.n_passed > 0, records)
     summary["funnel"] = rf.as_dict()
+
+    reasons = [r.reason for r in records.values()]
+    status = outcomes.decide_repo_status(
+        reasons,
+        n_generated=rf.count("generated"),
+        n_compiled=rf.count("compiled"),
+    )
+    summary["metrics"] = _repo_metrics(records, baseline, hybrid_tests)
     return finish(status)
 
 

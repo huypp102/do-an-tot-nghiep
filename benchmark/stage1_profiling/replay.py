@@ -194,7 +194,8 @@ def run_replay_checks(
     })
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout_sec,
             cwd=str(work_dir), env=env,
         )
     except subprocess.TimeoutExpired:
