@@ -77,6 +77,11 @@ class HotspotRecord:
     direct_runtime_share_pct: float | None = None
     dependency_roots: list = field(default_factory=list)
     blocked_roots: list = field(default_factory=list)
+    # LẦN CHẠY CHẨN ĐOÁN (mục B6): CHỈ điền khi reason=NOT_COVERED_BY_TESTS --
+    # để ước lượng có đáng sinh đầu vào giả cho hàm này thay vì loại luôn hay
+    # không (hàm dài + nhiều phụ thuộc thì sinh input giả rủi ro cao hơn).
+    not_covered_n_lines: int | None = None
+    not_covered_dependencies: list = field(default_factory=list)
     translation_unit: str = ""       # FUNCTION | BATCH_CALLER
     tier: str = ""
     tier_reason: str = ""
@@ -153,6 +158,8 @@ class HotspotRecord:
             "direct_runtime_share_pct": self.direct_runtime_share_pct,
             "dependency_roots": self.dependency_roots,
             "blocked_roots": self.blocked_roots,
+            "not_covered_n_lines": self.not_covered_n_lines,
+            "not_covered_dependencies": self.not_covered_dependencies,
             "translation_unit": self.translation_unit,
             "tier": self.tier,
             "tier_reason": self.tier_reason,
@@ -533,6 +540,20 @@ def _run_after_install(
     if err:
         return finish(outcomes.NO_MEASURABLE_HOTSPOT, f"phát lại thất bại: {err}")
 
+    # mục B6: tra CHỈ khi cần (NOT_COVERED_BY_TESTS) -- tránh quét toàn graph
+    # mỗi hotspot khi không dùng tới. capture_plugin.py chạy trong subprocess
+    # riêng (venv của repo) nên KHÔNG có `graph` ở đó; nơi DUY NHẤT có cả
+    # reason lẫn graph để ghép là đây.
+    _fn_by_name: dict[str, object] | None = None
+
+    def _lookup_function_node(fn_name: str):
+        nonlocal _fn_by_name
+        if _fn_by_name is None:
+            _fn_by_name = {}
+            for fid, fnode in graph.functions.items():
+                _fn_by_name.setdefault(fnode.name, fnode)
+        return _fn_by_name.get(fn_name)
+
     for name, v in verdicts.items():
         rec = records.get(name)
         if rec is None:
@@ -544,6 +565,16 @@ def _run_after_install(
         rec.observed_kwarg_types = v.observed_kwarg_types
         if v.reason:
             rec.set_reason(v.reason, v.detail)
+            if v.reason == outcomes.NOT_COVERED_BY_TESTS:
+                fnode = _lookup_function_node(name)
+                if fnode is not None:
+                    rec.not_covered_n_lines = fnode.lineno_end - fnode.lineno_start + 1
+                    callee_ids = {
+                        e.callee for e in graph.call_edges if e.caller == fnode.id
+                    }
+                    rec.not_covered_dependencies = sorted(
+                        graph.functions[cid].name for cid in callee_ids if cid in graph.functions
+                    )
         elif v.tier not in (TIER_NATIVE, TIER_KERNEL):
             rec.set_reason(outcomes.UNSUPPORTED_KIND, v.tier_reason or "không phân tầng được")
     summary["stages"]["replay"] = {n: v.as_dict() for n, v in verdicts.items()}
