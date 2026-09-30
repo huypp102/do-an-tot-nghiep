@@ -27,6 +27,13 @@ dataset:
   enabled: true
   max_repos: 12
 
+# LẦN CHẠY CHẨN ĐOÁN (2026-09-30, "lần chạy 4"): mục tiêu KHÔNG phải số đẹp
+# mà là biết DSR@N thực sự bão hoà ở đâu -- 3 vòng (mặc định config.yaml) có
+# thể cắt sớm trước khi thấy hết khả năng tự sửa lỗi của Generator Agent.
+# Pass@1 KHÔNG đổi theo số này (luôn tính từ vòng 0 riêng, xem loop_runner.py).
+compiler_loop:
+  max_retries: 5
+
 graph:
   # PCG ĐỘNG theo POLO (Eq.1-2): xếp hạng hotspot bằng thời gian chạy thật thay
   # vì chỉ cấu trúc liên kết tĩnh.

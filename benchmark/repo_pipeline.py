@@ -86,6 +86,10 @@ class HotspotRecord:
     compile_attempts: int = 0
     fix_rounds: int = 0
     error_classes: list[str] = field(default_factory=list)
+    compiled_at_round: int | None = None
+    """Vòng (0-based) mà hotspot này biên dịch được, None nếu không bao giờ
+    biên dịch được trong giới hạn max_retries (hoặc bị skip). Pass@1 vẫn LUÔN
+    tính từ vòng 0 riêng, không đổi theo max_retries -- xem loop_runner.py."""
     build_status: str = ""
     # correctness theo TỪNG phiên bản: {"rust_pure": "MATCH", "hybrid_pyo3": ...}
     correctness: dict = field(default_factory=dict)
@@ -149,6 +153,7 @@ class HotspotRecord:
             "compile_attempts": self.compile_attempts,
             "fix_rounds": self.fix_rounds,
             "error_classes": self.error_classes,
+            "compiled_at_round": self.compiled_at_round,
             "build_status": self.build_status,
             "correctness": self.correctness,
             "input_spec": self.input_spec,
@@ -1009,6 +1014,7 @@ def _run_stage5(cfg, plan, rust_by_function, tiers, records, work_dir, agents,
         rec.compile_attempts = outcome.attempts
         rec.fix_rounds = outcome.fix_rounds
         rec.error_classes = list(outcome.error_classes)
+        rec.compiled_at_round = outcome.compiled_at_round
         if not outcome.compiled and not outcome.skipped:
             rec.set_reason(
                 outcomes.COMPILE_FAILED,

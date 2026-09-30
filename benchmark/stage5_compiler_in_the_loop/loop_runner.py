@@ -48,7 +48,13 @@ class HotspotCompileOutcome:
     passed_first_try: bool = False
     attempts: int = 0                  # số lần cargo check đã chạy
     fix_rounds: int = 0                # số lần gọi Generator Agent để sửa
-    error_classes: list[str] = field(default_factory=list)
+    error_classes: list[str] = field(default_factory=list)  # 1 phần tử / vòng LỖI
+    # LẦN CHẠY CHẨN ĐOÁN: vòng (0-based, 0 = lần thử ban đầu TRƯỚC khi sửa lần
+    # nào) mà hotspot này biên dịch được, hoặc None nếu không bao giờ biên
+    # dịch được trong giới hạn max_retries (hoặc bị skip). Tách riêng khỏi
+    # `passed_first_try`/Pass@1 (luôn tính từ vòng 0, KHÔNG đổi khi max_retries
+    # đổi) -- trường này để đọc lại được DSR@N cho từng N <= max_retries.
+    compiled_at_round: int | None = None
     skipped: bool = False
     skip_reason: str = ""
     final_error: str = ""
@@ -111,6 +117,7 @@ def run_compile_loop_for(
 
         if result.ok:
             outcome.compiled = True
+            outcome.compiled_at_round = attempt
             outcome.passed_first_try = attempt == 0
             logger.info(
                 "Stage 5 [%s]: biên dịch OK sau %d lần thử (%d lần sửa).",
@@ -158,6 +165,15 @@ def compute_metrics(outcomes: list[HotspotCompileOutcome]) -> dict[str, Any]:
     failed_first = [o for o in evaluated if not o.passed_first_try]
     debugged_ok = [o for o in failed_first if o.compiled]
 
+    # Bảng vòng sửa (mục E4 báo cáo chẩn đoán): {vòng (str) hoặc "null": số hàm
+    # biên dịch được ĐÚNG ở vòng đó}. "null" = không bao giờ biên dịch được
+    # trong giới hạn max_retries (không tính hotspot bị skip -- không cho kết
+    # luận gì về chất lượng code).
+    round_histogram: dict[str, int] = {}
+    for o in evaluated:
+        key = "null" if o.compiled_at_round is None else str(o.compiled_at_round)
+        round_histogram[key] = round_histogram.get(key, 0) + 1
+
     metrics: dict[str, Any] = {
         "n_total": len(outcomes),
         "n_evaluated": n,
@@ -166,6 +182,7 @@ def compute_metrics(outcomes: list[HotspotCompileOutcome]) -> dict[str, Any]:
         "n_compiled_eventually": len([o for o in evaluated if o.compiled]),
         "pass_at_1": (len(passed_first) / n) if n else None,
         "dsr_at_1": (len(debugged_ok) / len(failed_first)) if failed_first else None,
+        "compiled_at_round_histogram": round_histogram,
     }
     if skipped:
         metrics["skip_reason"] = skipped[0].skip_reason
