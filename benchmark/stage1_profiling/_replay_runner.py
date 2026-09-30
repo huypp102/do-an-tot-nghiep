@@ -31,6 +31,61 @@ R_UNRESOLVABLE_IMPORT = "UNRESOLVABLE_IMPORT"
 R_CORRECTNESS_FAILED = "CORRECTNESS_FAILED"
 
 
+R_KHONG_KIEM_DUOC = "KHONG_KIEM_DUOC"
+
+
+def _generate_mutant(value):
+    """mục B2 -- biến đổi NHỎ, AN TOÀN cho 1 giá trị. Trả về (mutant, True)
+    nếu sinh được, (None, False) nếu KHÔNG BIẾT cách biến đổi an toàn kiểu
+    này (object của repo, numpy array, PIL Image...) -- thà báo KHONG_KIEM_DUOC
+    còn hơn đoán bừa ra 1 giá trị vô nghĩa rồi kết luận sai."""
+    if isinstance(value, bool):
+        return not value, True
+    if isinstance(value, int):
+        return value + 1, True
+    if isinstance(value, float):
+        return value * 1.1 + 0.01, True
+    if isinstance(value, str):
+        return (value + "_mut") if value else "mut", True
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None, False
+        mutated_first, ok = _generate_mutant(value[0])
+        if not ok:
+            return None, False
+        new_seq = [mutated_first, *value[1:]]
+        return (tuple(new_seq) if isinstance(value, tuple) else new_seq), True
+    if isinstance(value, dict):
+        if not value:
+            return None, False
+        new_dict = dict(value)
+        first_key = next(iter(new_dict))
+        mutated_val, ok = _generate_mutant(new_dict[first_key])
+        if not ok:
+            return None, False
+        new_dict[first_key] = mutated_val
+        return new_dict, True
+    return None, False
+
+
+def _generate_mutant_call(call_args: tuple, call_kwargs: dict):
+    """Thử biến đổi đối số VỊ TRÍ đầu tiên trước, không được thì thử đối số
+    TỪ KHOÁ đầu tiên. Trả về (new_args, new_kwargs, True) hoặc
+    (None, None, False)."""
+    if call_args:
+        mutated, ok = _generate_mutant(call_args[0])
+        if ok:
+            return (mutated, *call_args[1:]), dict(call_kwargs), True
+    if call_kwargs:
+        first_key = next(iter(call_kwargs))
+        mutated, ok = _generate_mutant(call_kwargs[first_key])
+        if ok:
+            new_kwargs = dict(call_kwargs)
+            new_kwargs[first_key] = mutated
+            return tuple(call_args), new_kwargs, True
+    return None, None, False
+
+
 def _pil_shadow_recheck(run_a: list[dict], run_b: list[dict]) -> dict | None:
     """mục B5, CHẾ ĐỘ BÓNG: với kết quả trông giống PIL Image (duck-type --
     có tobytes/size/mode, KHÔNG import PIL trực tiếp vì không phải repo nào
@@ -106,6 +161,7 @@ def main() -> int:
             "n_calls": meta.get("n_calls_captured", 0),
             "n_distinct_inputs": None,  # mục B3 -- điền lại bên dưới nếu đọc được calls
             "nondeterministic_shadow_pil_recheck": None,  # mục B5
+            "shadow_mutation": None,  # mục B2
             "observed_arg_types": meta.get("observed_arg_types") or [],
             "observed_kwarg_types": meta.get("observed_kwarg_types") or {},
             "tier": "",
@@ -299,6 +355,59 @@ def main() -> int:
                 f"{v}: {record['correctness'][v]['detail']}"
                 for v, s in statuses.items() if s == "MISMATCH"
             )
+
+        # --- mục B2 (CHẾ ĐỘ BÓNG): mutation test -- KHÔNG đổi reason/status
+        # đã tính ở trên. Chạy trên đối số MUTATE từ lời gọi ĐẦU TIÊN, so
+        # Python gốc với TỪNG bản Rust -- KHÁC captured calls thật, mục đích
+        # là bắt hàm chỉ khớp NGẪU NHIÊN trên đúng đối số đã ghi (vd trả hằng
+        # số trùng hợp bằng captured call) chứ không khớp vùng lân cận.
+        try:
+            m_args, m_kwargs, m_ok = _generate_mutant_call(
+                tuple(_loads_seq(calls[0].get("args_pre"))) if calls else (),
+                _loads_map(calls[0].get("kwargs_pre")) if calls else {},
+            )
+            if not m_ok:
+                record["shadow_mutation"] = {
+                    "status": R_KHONG_KIEM_DUOC,
+                    "reason": "không biết cách biến đổi an toàn kiểu đối số này "
+                              "(không phải int/float/str/bool/list/tuple/dict đơn giản)",
+                }
+            else:
+                try:
+                    py_mutant_result = py_fn(*m_args, **m_kwargs)
+                    py_mutant_ok = True
+                except BaseException as exc:  # noqa: BLE001
+                    py_mutant_result = f"{type(exc).__name__}: {exc}"
+                    py_mutant_ok = False
+                per_version: dict = {}
+                for version, spec in targets.items():
+                    try:
+                        rust_fn_m = resolve_callable(
+                            spec["ext_module"], spec.get("ext_func") or name, spec.get("ext_root"),
+                        )
+                        rust_mutant_result = rust_fn_m(*m_args, **m_kwargs)
+                        if not py_mutant_ok:
+                            per_version[version] = {
+                                "status": "ERROR",
+                                "detail": f"Python ném lỗi trên đối số mutate: {py_mutant_result}",
+                            }
+                            continue
+                        ok, why = deep_compare(py_mutant_result, rust_mutant_result, args.rtol, args.atol)
+                        per_version[version] = (
+                            {"status": "MATCH"} if ok else {"status": "MISMATCH", "detail": why}
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        per_version[version] = {
+                            "status": "ERROR", "detail": f"{type(exc).__name__}: {exc}",
+                        }
+                record["shadow_mutation"] = {
+                    "status": "TESTED",
+                    "mutated_args_repr": [_short(x) for x in m_args],
+                    "mutated_kwargs_repr": {k: _short(v) for k, v in m_kwargs.items()},
+                    "per_version": per_version,
+                }
+        except Exception as exc:  # noqa: BLE001 -- quan sát, không được làm hỏng phát lại
+            record["shadow_mutation"] = {"status": R_KHONG_KIEM_DUOC, "reason": f"lỗi nội bộ: {exc}"}
 
         out.append(record)
 

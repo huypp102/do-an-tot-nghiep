@@ -98,6 +98,9 @@ class HotspotRecord:
     nondeterministic_shadow_pil_recheck: dict | None = None
     """CHẾ ĐỘ BÓNG (mục B5): chỉ có giá trị khi reason=NONDETERMINISTIC VÀ
     kết quả trông giống PIL Image -- xem _replay_runner.py::_pil_shadow_recheck."""
+    shadow_mutation: dict | None = None
+    """CHẾ ĐỘ BÓNG (mục B2): kết quả mutation test, status = TESTED |
+    KHONG_KIEM_DUOC -- xem _replay_runner.py::_generate_mutant_call."""
     observed_arg_types: list[str] = field(default_factory=list)
     observed_kwarg_types: dict = field(default_factory=dict)
     # Stage 5
@@ -182,6 +185,7 @@ class HotspotRecord:
             "n_captured_calls": self.n_captured_calls,
             "n_distinct_inputs": self.n_distinct_inputs,
             "nondeterministic_shadow_pil_recheck": self.nondeterministic_shadow_pil_recheck,
+            "shadow_mutation": self.shadow_mutation,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
             "compiled": self.compiled,
@@ -909,6 +913,7 @@ def _run_one_arm(
                       "mismatches": e.get("mismatches", [])}
             for version, e in v.correctness.items()
         }
+        rec.shadow_mutation = v.shadow_mutation
         if v.reason == outcomes.CORRECTNESS_FAILED:
             rec.set_reason(outcomes.CORRECTNESS_FAILED, v.detail)
 

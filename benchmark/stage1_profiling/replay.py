@@ -141,6 +141,9 @@ class ReplayVerdict:
     nondeterministic_shadow_pil_recheck: dict | None = None
     """CHẾ ĐỘ BÓNG (mục B5): chỉ có giá trị khi reason=NONDETERMINISTIC VÀ
     kết quả trông giống PIL Image -- xem _replay_runner.py::_pil_shadow_recheck."""
+    shadow_mutation: dict | None = None
+    """CHẾ ĐỘ BÓNG (mục B2): kết quả mutation test -- xem
+    _replay_runner.py::_generate_mutant_call. status = TESTED | KHONG_KIEM_DUOC."""
     tier: str = ""
     tier_reason: str = ""
     # correctness theo từng phiên bản: {"rust_pure": {...}, "hybrid_pyo3": {...}}
@@ -156,6 +159,7 @@ class ReplayVerdict:
             "n_calls": self.n_calls,
             "n_distinct_inputs": self.n_distinct_inputs,
             "nondeterministic_shadow_pil_recheck": self.nondeterministic_shadow_pil_recheck,
+            "shadow_mutation": self.shadow_mutation,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
             "tier": self.tier,
@@ -232,6 +236,7 @@ def run_replay_checks(
             n_calls=int(item.get("n_calls", 0) or 0),
             n_distinct_inputs=item.get("n_distinct_inputs"),
             nondeterministic_shadow_pil_recheck=item.get("nondeterministic_shadow_pil_recheck"),
+            shadow_mutation=item.get("shadow_mutation"),
             observed_arg_types=item.get("observed_arg_types") or [],
             observed_kwarg_types=item.get("observed_kwarg_types") or {},
             tier=item.get("tier", ""),
