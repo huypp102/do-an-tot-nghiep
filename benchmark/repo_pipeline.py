@@ -113,6 +113,9 @@ class HotspotRecord:
     accepted_round: int | None = None
     accepted_speedup: dict = field(default_factory=dict)   # {version: speedup}
     best_speedup: dict = field(default_factory=dict)       # {version: speedup} (nhãn riêng)
+    hybrid_slower: bool = False
+    """CHẾ ĐỘ BÓNG (mục B4): hybrid_pyo3 được CHẤP NHẬN nhưng speedup < 1.0 --
+    chỉ đo, không đổi quyết định accept."""
     stopped_by_cap: bool = False
     # --- PHẦN 1.3: chống "đúng một cách rỗng" ---
     rust_call_count: int | None = None
@@ -183,6 +186,7 @@ class HotspotRecord:
             "accepted_round": self.accepted_round,
             "accepted_speedup": self.accepted_speedup,
             "best_speedup_any_round": self.best_speedup,
+            "hybrid_slower": self.hybrid_slower,
             "stopped_by_cap": self.stopped_by_cap,
             "rust_call_count": self.rust_call_count,
             "vacuous": self.vacuous,
@@ -1368,6 +1372,12 @@ def _run_phase_f(
             if decision.accepted:
                 rec.accepted_round = round_index
                 rec.accepted_speedup = dict(round_entry["speedup"])
+                # LẦN CHẠY CHẨN ĐOÁN (mục B4) -- CHẾ ĐỘ BÓNG: chỉ ĐO, không đổi
+                # quyết định accept. Decision Agent (LLM) có thể chấp nhận vì lý
+                # do khác tốc độ (rule-based ACCEPT_THRESHOLD=1.0 thường chặn
+                # trước, nhưng nhánh LLM có thể không).
+                hp = rec.accepted_speedup.get("hybrid_pyo3")
+                rec.hybrid_slower = hp is not None and hp < 1.0
             for version, sp in round_entry["speedup"].items():
                 prev = rec.best_speedup.get(version)
                 rec.best_speedup[version] = sp if prev is None else max(prev, sp)
