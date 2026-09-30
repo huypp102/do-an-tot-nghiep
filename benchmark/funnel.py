@@ -128,9 +128,10 @@ def funnel_from_record(rec, gate_label_ok: bool = True) -> dict[str, bool]:
         flags["tier_supported"] = False
         return flags
 
-    # Hotspot bị Decision Gate gạt không đi tiếp, nhưng KHÔNG phải thất bại --
-    # nó chỉ không thuộc phạm vi dịch. Dừng phễu ở đây.
-    if reason == outcomes.GATE_SKIPPED or not gate_label_ok:
+    # Hotspot bị Decision Gate gạt, HOẶC hợp lệ nhưng ngoài hạn mức
+    # top_k_translate -- cả hai đều KHÔNG phải thất bại, chỉ không thuộc
+    # phạm vi dịch lượt này. Dừng phễu ở đây.
+    if reason in (outcomes.GATE_SKIPPED, outcomes.EXCLUDED_BY_TOP_K) or not gate_label_ok:
         return flags
 
     if reason == outcomes.LLM_FAILED:

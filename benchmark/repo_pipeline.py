@@ -506,7 +506,7 @@ def _run_after_install(
         # KHÔNG phải thất bại: hotspot hợp lệ nhưng xếp sau hạn mức. Ghi lý do
         # riêng để bảng phễu không tính nhầm thành lỗi kỹ thuật.
         records[s.function_name].set_reason(
-            outcomes.GATE_SKIPPED,
+            outcomes.EXCLUDED_BY_TOP_K,
             f"hợp lệ nhưng xếp hạng FuncRank #{rank_of.get(s.function_name, '?') + 1}, "
             f"ngoài hạn mức top_k_translate={top_k_translate}",
         )

@@ -98,6 +98,13 @@ cho việc bỏ qua im lặng trước đây."""
 GATE_SKIPPED = "GATE_SKIPPED"
 """Decision Gate (Stage 2) gán nhãn skip/vectorize -> cố ý không dịch."""
 
+EXCLUDED_BY_TOP_K = "EXCLUDED_BY_TOP_K"
+"""Hợp lệ, QUA được Decision Gate, nhưng xếp hạng FuncRank NGOÀI hạn mức
+`top_k_translate` -- khác GATE_SKIPPED (đó là Gate CHỦ ĐỘNG loại, đây là hạn
+mức số lượng cắt SAU Gate). Tách riêng để bảng ngưỡng (mục E báo cáo chẩn
+đoán) đếm được CHÍNH XÁC bao nhiêu hàm bị cắt vì hạn mức, không lẫn với các
+lý do Gate khác."""
+
 LLM_FAILED = "LLM_FAILED"
 """Generator Agent không sinh được code Rust (backend lỗi, response rỗng...)."""
 
@@ -111,7 +118,8 @@ MEASURE_FAILED = "MEASURE_FAILED"
 HOTSPOT_REASONS = (
     MEASURED, UNSUPPORTED_KIND, UNREPLAYABLE_ARGS, NOT_COVERED_BY_TESTS,
     NONDETERMINISTIC, UNRESOLVABLE_IMPORT, COMPILE_FAILED, CORRECTNESS_FAILED,
-    NO_IMPLEMENTATION, GATE_SKIPPED, LLM_FAILED, BUILD_FAILED, MEASURE_FAILED,
+    NO_IMPLEMENTATION, GATE_SKIPPED, EXCLUDED_BY_TOP_K, LLM_FAILED,
+    BUILD_FAILED, MEASURE_FAILED,
 )
 
 # Giải thích ngắn cho từng lý do -- in ra bảng kết quả và đưa vào báo cáo để
@@ -127,6 +135,7 @@ REASON_HELP: dict[str, str] = {
     CORRECTNESS_FAILED: "output Rust lệch so với bản Python",
     NO_IMPLEMENTATION: "không tra được hàm trong registry",
     GATE_SKIPPED: "Decision Gate gán nhãn skip/vectorize -- cố ý không dịch",
+    EXCLUDED_BY_TOP_K: "qua được Gate nhưng ngoài hạn mức top_k_translate",
     LLM_FAILED: "Generator Agent không sinh được code Rust",
     BUILD_FAILED: "cargo check OK nhưng maturin develop thất bại / thiếu toolchain",
     MEASURE_FAILED: "build xong nhưng không đo ra số liệu",
