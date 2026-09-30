@@ -65,9 +65,18 @@ class HotspotRecord:
     # PHA 4.4: ba tầng gate giữ RIÊNG, không gộp thành một điểm số. `gate_label`
     # ở trên chỉ là bản map 3 nhãn cũ cho tương thích ngược.
     gate_decision: str = ""          # SELECT | REVIEW | KEEP_PYTHON | REJECT_BLOCKED
+    gate_decision_reason: str = ""
     gate_hotspot_level: str = ""
     gate_feasibility: str = ""
     gate_confidence_level: str = ""
+    # LẦN CHẠY CHẨN ĐOÁN (mục C): số thô của Gate (GateVerdict), trước đây CHỈ
+    # có bản flatten (gate_hotspot_level/gate_feasibility ở trên) chứ không có
+    # con số/danh sách gốc -- không quét lại offline được vì thiếu dữ liệu.
+    funcrank_static: float | None = None
+    funcrank_quantile: float | None = None
+    direct_runtime_share_pct: float | None = None
+    dependency_roots: list = field(default_factory=list)
+    blocked_roots: list = field(default_factory=list)
     translation_unit: str = ""       # FUNCTION | BATCH_CALLER
     tier: str = ""
     tier_reason: str = ""
@@ -135,9 +144,15 @@ class HotspotRecord:
             "detail": self.detail,
             "gate_label": self.gate_label,
             "gate_decision": self.gate_decision,
+            "gate_decision_reason": self.gate_decision_reason,
             "gate_hotspot_level": self.gate_hotspot_level,
             "gate_feasibility": self.gate_feasibility,
             "gate_confidence_level": self.gate_confidence_level,
+            "funcrank_static": self.funcrank_static,
+            "funcrank_quantile": self.funcrank_quantile,
+            "direct_runtime_share_pct": self.direct_runtime_share_pct,
+            "dependency_roots": self.dependency_roots,
+            "blocked_roots": self.blocked_roots,
             "translation_unit": self.translation_unit,
             "tier": self.tier,
             "tier_reason": self.tier_reason,
@@ -399,9 +414,15 @@ def _run_after_install(
             rec = records[name]
             rec.gate_label = labels[name]
             rec.gate_decision = v.decision
+            rec.gate_decision_reason = v.decision_reason
             rec.gate_hotspot_level = v.hotspot_level
             rec.gate_feasibility = v.feasibility
             rec.gate_confidence_level = v.confidence_level
+            rec.funcrank_static = v.funcrank_static
+            rec.funcrank_quantile = v.funcrank_quantile
+            rec.direct_runtime_share_pct = v.direct_runtime_share_pct
+            rec.dependency_roots = list(v.dependency_roots or [])
+            rec.blocked_roots = list(v.blocked_roots or [])
             rec.translation_unit = v.translation_unit
             if labels[name] != LABEL_CANDIDATE:
                 rec.set_reason(
@@ -830,7 +851,13 @@ def _run_one_arm(
         rec.correctness = {
             version: {"status": e.get("status"), "detail": e.get("detail", ""),
                       "n_matched": e.get("n_matched"), "n_samples": e.get("n_samples"),
-                      "rtol": rtol, "atol": atol}
+                      "rtol": rtol, "atol": atol,
+                      # LẦN CHẠY CHẨN ĐOÁN (mục C): trước đây chỉ giữ `detail`
+                      # (lời gọi MISMATCH ĐẦU TIÊN) -- `mismatches` giữ tới 10
+                      # lời gọi lệch (stage1_profiling/_replay_runner.py), cần
+                      # đủ để quét offline xem lệch có theo QUY LUẬT không
+                      # (vd luôn lệch ở kiểu float) hay ngẫu nhiên.
+                      "mismatches": e.get("mismatches", [])}
             for version, e in v.correctness.items()
         }
         if v.reason == outcomes.CORRECTNESS_FAILED:
