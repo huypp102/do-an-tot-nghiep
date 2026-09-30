@@ -31,6 +31,39 @@ R_UNRESOLVABLE_IMPORT = "UNRESOLVABLE_IMPORT"
 R_CORRECTNESS_FAILED = "CORRECTNESS_FAILED"
 
 
+def _pil_shadow_recheck(run_a: list[dict], run_b: list[dict]) -> dict | None:
+    """mục B5, CHẾ ĐỘ BÓNG: với kết quả trông giống PIL Image (duck-type --
+    có tobytes/size/mode, KHÔNG import PIL trực tiếp vì không phải repo nào
+    cũng cài), so lại bằng `.tobytes()` (giá trị pixel thật) thay vì
+    `deep_compare` mặc định (rơi về so `__dict__`, không thấy pixel của PIL
+    Image). KHÔNG đổi `reason`/`detail` -- chỉ ghi thêm để biết
+    NONDETERMINISTIC có phải dương tính giả (do cách so mặc định yếu với
+    kiểu này) hay là bất định THẬT (tobytes cũng lệch)."""
+    if len(run_a) != len(run_b):
+        return None
+    n_pil = 0
+    n_tobytes_equal = 0
+    for a, b in zip(run_a, run_b):
+        ra, rb = a.get("result"), b.get("result")
+        if not all(hasattr(ra, attr) for attr in ("tobytes", "size", "mode")):
+            continue
+        if not all(hasattr(rb, attr) for attr in ("tobytes", "size", "mode")):
+            continue
+        n_pil += 1
+        try:
+            if ra.mode == rb.mode and ra.size == rb.size and ra.tobytes() == rb.tobytes():
+                n_tobytes_equal += 1
+        except Exception:  # noqa: BLE001 -- quan sát, không được làm hỏng phát lại
+            pass
+    if n_pil == 0:
+        return None
+    return {
+        "n_pil_like_results": n_pil,
+        "n_tobytes_equal": n_tobytes_equal,
+        "possible_false_positive": n_tobytes_equal == n_pil,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture-dir", required=True)
@@ -72,6 +105,7 @@ def main() -> int:
             "detail": meta.get("detail", ""),
             "n_calls": meta.get("n_calls_captured", 0),
             "n_distinct_inputs": None,  # mục B3 -- điền lại bên dưới nếu đọc được calls
+            "nondeterministic_shadow_pil_recheck": None,  # mục B5
             "observed_arg_types": meta.get("observed_arg_types") or [],
             "observed_kwarg_types": meta.get("observed_kwarg_types") or {},
             "tier": "",
@@ -189,6 +223,10 @@ def main() -> int:
                 f"phát lại 2 lần trên bản Python ra kết quả khác nhau -- {why}. "
                 "Loại khỏi so sánh correctness vì không có chuẩn ổn định."
             )
+            try:
+                record["nondeterministic_shadow_pil_recheck"] = _pil_shadow_recheck(run1, run2)
+            except Exception:  # noqa: BLE001 -- quan sát, không được làm hỏng phát lại
+                pass
             out.append(record)
             continue
 
