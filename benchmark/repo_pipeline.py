@@ -216,6 +216,22 @@ def run_repo_pipeline(
         if note:
             summary["status_note"] = note
         summary["hotspots"] = [r.as_dict() for r in records.values()]
+        # ------------------------------------- AUDIT_RUN4_v2 mục 5, điểm 2
+        # `finish()` là điểm thoát DUY NHẤT nên bắt được MỌI đường ra (kể cả
+        # chết sớm trước khi có graph). KHÔNG cần truy cập `graph` ở đây --
+        # chỉ cần `records`, và overlay_outcomes() tự xử lý trường hợp chưa
+        # có pcg.json (ghi graph_available=false thay vì đoán).
+        # symbols_in_prompt CHƯA implement (cần đối chiếu dependency_roots
+        # với prompt đã lưu ở generator_agent.py) -- để None, không đoán bừa.
+        try:
+            from audit.graph_snapshot import overlay_outcomes
+
+            overlay_outcomes(
+                results_dir=results_dir, label=label, records=records,
+                in_prompt_by_function=None,
+            )
+        except Exception:  # noqa: BLE001 -- quan sát, không được đổi outcome
+            logger.exception("audit.graph_snapshot.overlay_outcomes lỗi -- bỏ qua.")
         summary["ok"] = outcomes.is_success(status)
         summary["duration_sec"] = round(time.perf_counter() - t_start, 2)
         out_path = Path(results_dir) / f"repo_summary_{timestamp}_{label}.json"
@@ -288,6 +304,12 @@ def _run_after_install(
 
     ro_cfg = cfg.get("repo_oracle") or {}
     graph_cfg = cfg.get("graph") or {}
+    # Đọc TRƯỚC khi dựng graph -- trước đây dòng `graph.build_mode = "static"`
+    # bên dưới bị hard-code TRƯỚC khi biến này tồn tại, nên nhãn build_mode
+    # xuất ra (context_export.py, packager.py) luôn ghi "static" dù config đặt
+    # "dynamic". KHÔNG có logic nào đọc `graph.build_mode` để RẼ NHÁNH hành vi
+    # (đã rà: chỉ dùng làm nhãn/log) nên sửa nhãn ở đây không đổi kết quả.
+    build_mode = str(graph_cfg.get("build_mode", "static"))
 
     # ------------------------------------------------------------ STAGE 0
     _banner("STAGE 0", "Dựng PCG/PSG + FuncRank trên BẢN COPY của repo")
@@ -295,7 +317,7 @@ def _run_after_install(
     if not files:
         return finish(outcomes.NO_MEASURABLE_HOTSPOT, "không có file .py nào trong repo")
     graph = build_graph(files, work_dir)
-    graph.build_mode = "static"
+    graph.build_mode = build_mode
     logger.info(
         "Graph (%s): %d file, %d hàm, %d call edge.",
         graph.backend, len(graph.files), len(graph.functions), len(graph.call_edges),
@@ -306,7 +328,6 @@ def _run_after_install(
     # rồi lọc bằng tiêu chí khách quan (phát lại được + thuộc Tầng 1/2) và giữ
     # `top_k_translate` hotspot ĐẦU TIÊN theo đúng thứ tự đó.
     pool_size = int(graph_cfg.get("candidate_pool", 30))
-    build_mode = str(graph_cfg.get("build_mode", "static"))
 
     # LỌC HÀM TEST TRƯỚC KHI XẾP HẠNG. Trên lượt chạy thật, 18% chỗ trong pool
     # bị hàm test chiếm (BBuf_onnx_learn: 14/23 = 60%). Dịch hàm test sang Rust
@@ -398,8 +419,23 @@ def _run_after_install(
     else:
         labels = {}
         candidates = list(functions)
+        verdicts = {}
         logger.info("STAGE 2 | Decision Gate TẮT -- mọi hotspot là candidate.")
         summary["stages"]["stage2"] = {"labels": labels, "candidates": candidates}
+
+    # ------------------------------------------ AUDIT_RUN4_v2 mục 5, điểm 1
+    # Công cụ QUAN SÁT -- KHÔNG đổi quyết định Gate hay outcome hotspot nào.
+    # Bọc try/except NGOÀI: lỗi export tuyệt đối không được làm sập pipeline
+    # hay che lỗi gốc.
+    try:
+        from audit.graph_snapshot import write_snapshot
+
+        write_snapshot(
+            graph, results_dir=results_dir, label=label, verdicts=verdicts,
+            excluded_ids=excluded_ids, build_mode=build_mode, gate_enabled=gate_enabled,
+        )
+    except Exception:  # noqa: BLE001 -- quan sát, không được phép làm hỏng lượt chạy
+        logger.exception("audit.graph_snapshot.write_snapshot lỗi -- bỏ qua, KHÔNG dừng pipeline.")
 
     # ------------------------------------------------------- PHA B (specs)
     _banner("PHA B", "Đổi đường dẫn file -> module:qualname")

@@ -45,6 +45,7 @@ GROUPS: dict[str, str] = {
     "test_partbc.py": "fast",
     "test_full_mock.py": "fast",
     "test_phase_ab.py": "venv",
+    "test_graph_export_regression.py": "venv",
     "test_no_silent_fallback.py": "venv",
     "test_phase_g.py": "venv",
     "test_legacy_and_exit.py": "venv",
