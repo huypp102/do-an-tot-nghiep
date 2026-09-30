@@ -6,6 +6,7 @@ HOAN VI NGAU NHIEN CO SEED, them CAN BANG MIEN (ai_preprocessing/general):
     n_backup_repos              1 -> 2   (2 -> 1 -> 2)
     screening_limit            25 -> 50
     sample_seed                 (moi) 42
+    repo_time_budget_sec  1800 -> 3000   (can cu: haishoku 998s / 3 nhanh)
     noise_floor_max_hotspots   5         (giu nguyen, khoa PHANG)
 
 Voi ti le dat 24-30% do duoc o pilot 1, can sang ~41-50 ung vien de ky vong du
@@ -128,7 +129,7 @@ for key, want in (("max_wall_hours", 6), ("test_timeout_sec", None)):
 ro = prof.get("repo_oracle") or {}
 check(ro.get("test_timeout_sec") == 600, "test_timeout_sec GIU NGUYEN = 600",
       f"thuc te {ro.get('test_timeout_sec')!r}")
-check(ro.get("repo_time_budget_sec") == 1800, "repo_time_budget_sec GIU NGUYEN = 1800",
+check(ro.get("repo_time_budget_sec") == 3000, "repo_time_budget_sec = 3000 (tu 1800)",
       f"thuc te {ro.get('repo_time_budget_sec')!r}")
 
 # Ham thuc su duoc pipeline goi phai tra ra 5, khong phai mac dinh 10.

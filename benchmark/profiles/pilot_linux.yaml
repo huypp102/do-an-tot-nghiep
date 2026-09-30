@@ -58,7 +58,21 @@ repo_oracle:
   keep_venv: false          # BẮT BUỘC false khi chạy nhiều repo, tránh đầy đĩa
   cleanup_work_dir: false   # giữ lại để còn xem crate + shim đã sinh
   test_timeout_sec: 600
-  repo_time_budget_sec: 1800
+  # LẦN CHẠY 4 (2026-09-30): 1800 -> 3000 (50 phút). Căn cứ DUY NHẤT đo được:
+  # LanceGin_haishoku chạy đủ 3 nhánh ablation (graph/none/graph2) hết 998s
+  # (~55% của 1800s cũ). Repo đó nhỏ (25 file .py, ~65 percentile của dataset
+  # 171 repo theo selection/domain_tags.csv: median 19 file, p90=61, p95=100,
+  # max ngoài 1 outlier = 436). Vì bước cài đặt + dựng PCG/PSG tỉ lệ theo số
+  # file mà Stage 5 (build Rust + LLM, phần tốn thời gian nhất) lại bị chặn
+  # trần bởi top_k_hotspots=5 * 3 nhánh -- không tăng thẳng theo kích thước
+  # repo -- nên KHÔNG suy tuyến tính theo p95/max. Chọn hệ số an toàn ~3x trên
+  # điểm đo được (998s) làm trần, KHÔNG phải trung bình kỳ vọng. CHỈ CÓ 1 điểm
+  # đo thật -- cần xác nhận lại bằng 2-3 repo nữa ngay trong lượt sàng của lần
+  # chạy 4 (screening không bật LLM/Rust nên tự nó đã đo thêm 50 điểm thời
+  # gian Pha A-B, dùng để tinh chỉnh số này ở lần chạy sau).
+  # 10 repo * ước lượng trung vị ~1000-1500s = 2.8-4.2h, vẫn nằm trong
+  # max_wall_hours=6h dù 1-2 repo chạm trần 3000s.
+  repo_time_budget_sec: 3000
   signature_support: extended
 
 experiment:
