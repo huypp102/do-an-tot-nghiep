@@ -132,6 +132,10 @@ class ReplayVerdict:
     reason: str | None = None       # None = ổn, chờ bước sau
     detail: str = ""
     n_calls: int = 0
+    n_distinct_inputs: int | None = None
+    """CHẾ ĐỘ BÓNG (mục B3): số đầu vào KHÁC NHAU trong `n_calls` lời gọi đã
+    ghi -- None nếu chưa đọc lại được call nào (khác n_calls=0: đó là CÓ đọc
+    nhưng không lời gọi nào trùng lặp, còn None là KHÔNG đọc được gì)."""
     observed_arg_types: list[str] = field(default_factory=list)
     observed_kwarg_types: dict[str, str] = field(default_factory=dict)
     tier: str = ""
@@ -147,6 +151,7 @@ class ReplayVerdict:
             "reason": self.reason,
             "detail": self.detail,
             "n_calls": self.n_calls,
+            "n_distinct_inputs": self.n_distinct_inputs,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
             "tier": self.tier,
@@ -221,6 +226,7 @@ def run_replay_checks(
             reason=item.get("reason"),
             detail=item.get("detail", ""),
             n_calls=int(item.get("n_calls", 0) or 0),
+            n_distinct_inputs=item.get("n_distinct_inputs"),
             observed_arg_types=item.get("observed_arg_types") or [],
             observed_kwarg_types=item.get("observed_kwarg_types") or {},
             tier=item.get("tier", ""),

@@ -71,6 +71,7 @@ def main() -> int:
             "reason": meta.get("reason"),
             "detail": meta.get("detail", ""),
             "n_calls": meta.get("n_calls_captured", 0),
+            "n_distinct_inputs": None,  # mục B3 -- điền lại bên dưới nếu đọc được calls
             "observed_arg_types": meta.get("observed_arg_types") or [],
             "observed_kwarg_types": meta.get("observed_kwarg_types") or {},
             "tier": "",
@@ -92,6 +93,24 @@ def main() -> int:
             record["detail"] = f"không unpickle được lời gọi đã ghi: {type(exc).__name__}: {exc}"
             out.append(record)
             continue
+
+        # --- mục B3 (CHẾ ĐỘ BÓNG): số ĐẦU VÀO KHÁC NHAU, khác n_calls (tổng
+        # số lời gọi, có thể trùng đối số). Chỉ đo, không đổi gì. Chữ ký = repr
+        # của (args, kwargs đã sắp theo tên) -- lời gọi không đọc lại được (vd
+        # lỗi unpickle riêng lẻ) coi là 1 đầu vào KHÁC BIỆT thay vì bỏ qua, để
+        # không đếm non con số này.
+        def _call_signature(call: dict) -> str:
+            try:
+                a = _loads_seq(call.get("args_pre"))
+                kw = _loads_map(call.get("kwargs_pre"))
+                return repr((a, sorted(kw.items())))
+            except Exception:  # noqa: BLE001
+                return f"<không đọc lại được #{id(call)}>"
+
+        try:
+            record["n_distinct_inputs"] = len({_call_signature(c) for c in calls})
+        except Exception:  # noqa: BLE001
+            record["n_distinct_inputs"] = None
 
         try:
             py_fn = resolve_callable(

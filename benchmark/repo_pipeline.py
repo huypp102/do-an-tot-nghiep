@@ -92,6 +92,9 @@ class HotspotRecord:
     ambiguity_detail: str = ""
     n_name_matches: int = 1
     n_captured_calls: int = 0
+    n_distinct_inputs: int | None = None
+    """CHẾ ĐỘ BÓNG (mục B3): số đầu vào KHÁC NHAU trong n_captured_calls lời
+    gọi -- None nếu không đọc lại được call nào."""
     observed_arg_types: list[str] = field(default_factory=list)
     observed_kwarg_types: dict = field(default_factory=dict)
     # Stage 5
@@ -171,6 +174,7 @@ class HotspotRecord:
             "ambiguity_detail": self.ambiguity_detail,
             "n_name_matches": self.n_name_matches,
             "n_captured_calls": self.n_captured_calls,
+            "n_distinct_inputs": self.n_distinct_inputs,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
             "compiled": self.compiled,
@@ -565,6 +569,7 @@ def _run_after_install(
         rec.tier = v.tier
         rec.tier_reason = v.tier_reason
         rec.n_captured_calls = v.n_calls
+        rec.n_distinct_inputs = v.n_distinct_inputs
         rec.observed_arg_types = v.observed_arg_types
         rec.observed_kwarg_types = v.observed_kwarg_types
         if v.reason:
