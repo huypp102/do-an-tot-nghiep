@@ -58,6 +58,9 @@ class HotspotCompileOutcome:
     skipped: bool = False
     skip_reason: str = ""
     final_error: str = ""
+    final_code: str = ""
+    """Code Rust ĐÃ BIÊN DỊCH ĐƯỢC (rỗng nếu không bao giờ biên dịch được hoặc
+    bị skip) -- dùng cho phân tích CHẾ ĐỘ BÓNG (mục B1: dò gõ cứng tĩnh)."""
 
 
 def _write_candidate_to_crate(rust_code: str, crate_dir: Path) -> Path:
@@ -118,6 +121,7 @@ def run_compile_loop_for(
         if result.ok:
             outcome.compiled = True
             outcome.compiled_at_round = attempt
+            outcome.final_code = current_code
             outcome.passed_first_try = attempt == 0
             logger.info(
                 "Stage 5 [%s]: biên dịch OK sau %d lần thử (%d lần sửa).",

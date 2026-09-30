@@ -119,6 +119,9 @@ class HotspotRecord:
     hybrid_slower: bool = False
     """CHẾ ĐỘ BÓNG (mục B4): hybrid_pyo3 được CHẤP NHẬN nhưng speedup < 1.0 --
     chỉ đo, không đổi quyết định accept."""
+    shadow_hardcoding: dict = field(default_factory=dict)
+    """CHẾ ĐỘ BÓNG (mục B1): kết quả dò gõ cứng tĩnh trên code Rust ĐÃ biên
+    dịch được -- xem stage5_compiler_in_the_loop/shadow_hardcoding.py."""
     stopped_by_cap: bool = False
     # --- PHẦN 1.3: chống "đúng một cách rỗng" ---
     rust_call_count: int | None = None
@@ -191,6 +194,7 @@ class HotspotRecord:
             "accepted_speedup": self.accepted_speedup,
             "best_speedup_any_round": self.best_speedup,
             "hybrid_slower": self.hybrid_slower,
+            "shadow_hardcoding": self.shadow_hardcoding,
             "stopped_by_cap": self.stopped_by_cap,
             "rust_call_count": self.rust_call_count,
             "vacuous": self.vacuous,
@@ -1118,6 +1122,19 @@ def _run_stage5(cfg, plan, rust_by_function, tiers, records, work_dir, agents,
         rec.fix_rounds = outcome.fix_rounds
         rec.error_classes = list(outcome.error_classes)
         rec.compiled_at_round = outcome.compiled_at_round
+        if outcome.compiled and outcome.final_code:
+            # LẦN CHẠY CHẨN ĐOÁN (mục B1) -- CHẾ ĐỘ BÓNG: chỉ đo, không đổi
+            # rec.compiled hay reason nào ở trên/dưới đoạn này.
+            try:
+                from stage5_compiler_in_the_loop.shadow_hardcoding import (
+                    detect_static_hardcoding,
+                )
+
+                rec.shadow_hardcoding = detect_static_hardcoding(outcome.final_code).as_dict()
+            except Exception:  # noqa: BLE001 -- quan sát, không được làm hỏng Stage 5
+                logger.exception(
+                    "Stage 5 [%s]: shadow_hardcoding lỗi -- bỏ qua, KHÔNG đổi kết quả.", name,
+                )
         if not outcome.compiled and not outcome.skipped:
             rec.set_reason(
                 outcomes.COMPILE_FAILED,
