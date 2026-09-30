@@ -1,13 +1,17 @@
-"""Xac nhan QUY MO pilot 2 duoc doc dung tu profiles/pilot_linux.yaml.
+"""Xac nhan QUY MO lan chay 4 duoc doc dung tu profiles/pilot_linux.yaml.
 
-Quy mo duoc chon THEO TI LE DAT THAT do duoc o pilot 1 (6/25 ung vien dau qua
-sang), khong theo mong muon:
-    n_repos                   10 -> 5    (12 -> 10 -> 5)
-    n_backup_repos             2 -> 1    (3 -> 2 -> 1)
-    screening_limit           25         (giu nguyen)
+LAN CHAY 4 (2026-09-30) -- gioi han CUNG 10 repo, doi thu tu sang tu TEN sang
+HOAN VI NGAU NHIEN CO SEED, them CAN BANG MIEN (ai_preprocessing/general):
+    n_repos                    5 -> 10   (10 -> 5 -> 10)
+    n_backup_repos              1 -> 2   (2 -> 1 -> 2)
+    screening_limit            25 -> 50
+    sample_seed                 (moi) 42
     noise_floor_max_hotspots   5         (giu nguyen, khoa PHANG)
 
-Can 5 + 1 = 6, uoc luong dat 6 -> SAT NGUONG, vua du va khong du.
+Voi ti le dat 24-30% do duoc o pilot 1, can sang ~41-50 ung vien de ky vong du
+10+2=12 -> screening_limit=50. estimate_pass_count(50)=12 (moc do gan nhat o
+pilot 1 la 40 ung vien) -> can 12 == dat 12 -> SAT NGUONG, dung nhu 3 pilot
+truoc (chi doi con so, giu nguyen TINH CHAT sat nguong).
 
 Test nay khong kiem logic, chi kiem CON SO THAT SU DEN DUOC NOI DUNG NO. Cach
 hong pho bien nhat la co cho nao hard-code hoac cache config cu roi de len --
@@ -18,7 +22,7 @@ Nen moi gia tri duoc kiem BA lan:
   (b) load_config(profile=...) tra ve so moi (khong phai mac dinh cua
       config.yaml, cung khong phai so cu);
   (c) noi TIEU THU no thuc su dung so do -- doc lai tu selection.json ma
-      run_experiment1.py --dry-run vua ghi.
+      run_experiment1.py --dry-run vua ghi (them: seed, cot ai_preprocessing).
 """
 import json
 import os
@@ -38,14 +42,14 @@ PROFILE_PATH = BENCH / "profiles" / f"{PROFILE}.yaml"
 
 # (gia tri MOI mong doi, gia tri CU phai KHONG con)
 EXPECTED = {
-    "n_repos": (5, 10),
-    "n_backup_repos": (1, 2),
-    "screening_limit": (25, 40),
+    "n_repos": (10, 5),
+    "n_backup_repos": (2, 1),
+    "screening_limit": (50, 25),
     "noise_floor_max_hotspots": (5, 10),
 }
 
 # Quy mo phai KHOP ti le dat do duoc, khong duoc dat cao hon roi mong.
-PILOT1_PASS_AT_25 = 6
+PILOT1_PASS_AT_LIMIT = 12
 
 errs: list[str] = []
 
@@ -160,31 +164,41 @@ else:
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     check(proc.returncode == 0, "--dry-run chay xong", f"exit={proc.returncode}")
-    check("cần 5 repo + 1 dự phòng" in out,
-          "man hinh in dung 'can 5 repo + 1 du phong'")
+    check("cần 10 repo + 2 dự phòng" in out,
+          "man hinh in dung 'can 10 repo + 2 du phong'")
     check("CẢNH BÁO CỠ MẪU: SÁT NGƯỠNG" in out,
           "canh bao dung mức SAT NGUONG (khong phai 'co the khong du')")
     check("có thể KHÔNG đủ" not in out,
-          "KHONG con thong diep cu 'co the khong du' (can 6 <= dat 6)")
+          "KHONG con thong diep cu 'co the khong du' (can 12 <= dat 12)")
     check("không dư ứng viên nào để loại thêm" in out,
           "canh bao noi ro la khong du bien an toan")
+    check("seed hoán vị: 42" in out, "man hinh in dung seed hoan vi = 42")
 
     sel_path = BENCH / "results" / run_id / "selection.json"
     check(sel_path.exists(), "co selection.json")
     if sel_path.exists():
         sel = json.loads(sel_path.read_text(encoding="utf-8"))
         n_cand = len(sel.get("candidates") or [])
-        check(n_cand <= 25, f"danh sach ung vien <= 25 (thuc te {n_cand})")
-        check(n_cand == 25, "dung 25 ung vien (dataset 171 repo nen khong bi thieu)",
+        check(n_cand <= 50, f"danh sach ung vien <= 50 (thuc te {n_cand})")
+        check(n_cand == 50, "dung 50 ung vien (dataset 171 repo nen khong bi thieu)",
               str(n_cand))
-        check(sel.get("screening_limit") == 25, "selection.json ghi screening_limit=25",
+        check(sel.get("screening_limit") == 50, "selection.json ghi screening_limit=50",
               str(sel.get("screening_limit")))
-        check(sel.get("n_repos") == 5, "selection.json ghi n_repos=5",
+        check(sel.get("n_repos") == 10, "selection.json ghi n_repos=10",
               str(sel.get("n_repos")))
-        check(sel.get("n_backup_repos") == 1, "selection.json ghi n_backup_repos=1",
+        check(sel.get("n_backup_repos") == 2, "selection.json ghi n_backup_repos=2",
               str(sel.get("n_backup_repos")))
+        check(sel.get("seed") == 42, "selection.json ghi seed=42",
+              str(sel.get("seed")))
+        check("n_ai_preprocessing_in_pool" in sel,
+              "selection.json ghi so repo ai_preprocessing trong pool ung vien")
         check(bool(sel.get("sample_size_warning")),
               "canh bao co mau duoc GHI vao selection.json (doc lai duoc sau)")
+        # Hoan vi phai KHAC thu tu ten -- bang chung day la ngau nhien that,
+        # khong phai sorted() nguy trang.
+        by_name = sorted(sel.get("candidates") or [])
+        check(sel.get("candidates") != by_name,
+              "thu tu candidates KHAC thu tu ten (dung la hoan vi, khong phai sort)")
 
 
 # ===========================================================================
@@ -197,7 +211,7 @@ import run_experiment1 as exp1  # noqa: E402
 n_rep, n_bk = EXPECTED["n_repos"][0], EXPECTED["n_backup_repos"][0]
 limit = EXPECTED["screening_limit"][0]
 est, how = exp1.estimate_pass_count(limit)
-check(est == PILOT1_PASS_AT_25, f"uoc luong dat o {limit} ung vien = {PILOT1_PASS_AT_25}",
+check(est == PILOT1_PASS_AT_LIMIT, f"uoc luong dat o {limit} ung vien = {PILOT1_PASS_AT_LIMIT}",
       f"{est} ({how})")
 check(n_rep + n_bk <= est,
       f"can {n_rep}+{n_bk}={n_rep + n_bk} <= uoc luong dat {est} (khong dat cao roi mong)")
@@ -215,16 +229,16 @@ import io as _io  # noqa: E402
 
 buf = _io.StringIO()
 with contextlib.redirect_stdout(buf):
-    txt_edge = _capture(n_rep, n_bk)      # can 6 == dat 6 -> SAT NGUONG
-    txt_short = _capture(10, 2)           # can 12 > dat 6 -> co the khong du
-    txt_ok = _capture(3, 1)               # can 4 < dat 6 -> du, co du
+    txt_edge = _capture(n_rep, n_bk)      # can 12 == dat 12 -> SAT NGUONG
+    txt_short = _capture(15, 3)           # can 18 > dat 12 -> co the khong du
+    txt_ok = _capture(3, 1)               # can 4 < dat 12 -> du, co du
 check("SÁT NGƯỠNG" in txt_edge and "có thể KHÔNG đủ" not in txt_edge,
       "can == dat -> chi in SAT NGUONG")
 check("không dư ứng viên nào để loại thêm" in txt_edge,
       "SAT NGUONG noi ro khong con du phong sai so")
 check("có thể KHÔNG đủ" in txt_short and "SÁT NGƯỠNG" not in txt_short,
       "can > dat -> in 'co the KHONG du'")
-check("dư 2 repo" in txt_ok and "CẢNH BÁO" not in txt_ok,
+check("dư 8 repo" in txt_ok and "CẢNH BÁO" not in txt_ok,
       "can < dat -> chi thong bao du, khong canh bao", txt_ok.strip()[:70])
 
 # ===========================================================================
@@ -309,8 +323,8 @@ check(len(rows) == 3, "van chay du 3 repo da chon", str(len(rows)))
 
 print()
 if errs:
-    print(f"### QUY MO PILOT 2: THAT BAI ({len(errs)})")
+    print(f"### QUY MO LAN CHAY 4: THAT BAI ({len(errs)})")
     for e in errs:
         print(f"   - {e}")
     sys.exit(1)
-print("### QUY MO PILOT 2: PASS")
+print("### QUY MO LAN CHAY 4: PASS")

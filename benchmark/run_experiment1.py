@@ -22,9 +22,11 @@ thay vì phải tin vào lời kể.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -41,15 +43,28 @@ ensure_utf8_stdio()
 logger = logging.getLogger("benchmark.run_experiment1")
 
 # QUY TẮC CHỌN MẪU -- chốt trước, ghi vào metadata, không đổi sau khi xem kết quả.
+#
+# LẦN CHẠY 4 (2026-09-30) đổi THỨ TỰ TÊN -> HOÁN VỊ NGẪU NHIÊN CÓ SEED CỐ ĐỊNH
+# (`experiment.sample_seed`, xem `_shuffled_candidates()`), và thêm bước CÂN
+# BẰNG MIỀN sau khi sàng xong (xem `balance_by_domain()`). Quy tắc DỪNG SÀNG
+# (mục 1-2 dưới đây) và quy tắc NHẬN/LOẠI từng repo (`evaluate_candidate`)
+# giữ NGUYÊN như 3 pilot trước.
 SELECTION_RULE = (
-    "Sàng tối đa `screening_limit` repo đầu tiên theo THỨ TỰ TÊN. Giữ repo thoả "
-    "CẢ HAI điều kiện: (1) bộ test Python gốc chạy được và pass >= 1 test "
-    "(repo_status không thuộc {BASELINE_FAILED, INSTALL_FAILED, TIMEOUT}; "
-    "bước sàng chạy KHÔNG có LLM nên ALL_HOTSPOTS_FAILED_COMPILE không thể "
-    "xuất hiện ở đây), (2) có >= "
-    "`min_replayable_hotspots` hotspot ghi + phát lại được đối số thật. Chọn "
-    "`n_repos` repo đầu tiên thoả, cộng `n_backup_repos` repo dự phòng dùng để "
-    "THAY khi một repo đã chọn bị INSTALL_FAILED ở lượt chạy chính."
+    "Sàng tối đa `screening_limit` repo đầu tiên theo HOÁN VỊ NGẪU NHIÊN CỐ "
+    "ĐỊNH của toàn bộ dataset (random.Random(sample_seed).shuffle, ghi seed "
+    "vào selection.json -- KHÔNG còn sắp theo tên). Giữ repo thoả CẢ HAI điều "
+    "kiện: (1) bộ test Python gốc chạy được và pass >= 1 test (repo_status "
+    "không thuộc {BASELINE_FAILED, INSTALL_FAILED, TIMEOUT}; bước sàng chạy "
+    "KHÔNG có LLM nên ALL_HOTSPOTS_FAILED_COMPILE không thể xuất hiện ở đây), "
+    "(2) có >= `min_replayable_hotspots` hotspot ghi + phát lại được đối số "
+    "thật. DỪNG SÀNG ngay khi đủ `n_repos + n_backup_repos` repo hợp lệ (đếm "
+    "phẳng, CHƯA xét miền). Sau đó CÂN BẰNG MIỀN trên đúng tập đã tìm được: "
+    "nếu có >= 5 repo `ai_preprocessing` hợp lệ, lấy đúng 5 repo đó (theo thứ "
+    "tự đã sàng) + 5 repo `general` đầu tiên làm `n_repos`; nếu ít hơn 5 thì "
+    "lấy HẾT số đó rồi bù bằng repo `general` cho đủ `n_repos`. Phần hợp lệ "
+    "còn dư (không rơi vào n_repos) làm `n_backup_repos` dự phòng, dùng để "
+    "THAY khi một repo đã chọn bị INSTALL_FAILED ở lượt chạy chính -- KHÔNG "
+    "phân biệt miền khi chọn dự phòng."
 )
 
 
@@ -113,7 +128,11 @@ def evaluate_candidate(row: dict, min_replayable: int) -> tuple[bool, str]:
 
 
 # Tỉ lệ đạt ĐO ĐƯỢC ở pilot 1 (run_20260928_150827, 40 ứng viên đầu theo thứ
-# tự tên trên dataset 171 repo). Dùng làm căn cứ cảnh báo, KHÔNG phải phỏng đoán.
+# tự TÊN trên dataset 171 repo -- pilot 1-3 sàng theo tên, LẦN CHẠY 4 đổi sang
+# hoán vị ngẫu nhiên có seed, xem `shuffled_candidates()`). Dùng làm căn cứ
+# cảnh báo, KHÔNG phải phỏng đoán -- coi tỉ lệ 24-30% là ĐẶC ĐIỂM DATASET (repo
+# nào qua được sàng, không phải vị trí trong danh sách), nên áp dụng lại được
+# cho một mẫu ngẫu nhiên cùng cỡ, dù thứ tự cụ thể sẽ khác.
 #
 #   trong 25 ứng viên đầu:  6 đạt (24%)
 #   trong 30 ứng viên đầu:  9 đạt (30%)
@@ -226,6 +245,79 @@ def warn_if_screening_too_small(limit: int, n_repos: int, n_backup: int) -> list
     return lines
 
 
+DEFAULT_DOMAIN_TAGS_CSV = BENCHMARK_ROOT / "selection" / "domain_tags.csv"
+AI_DOMAIN_QUOTA = 5  # xem SELECTION_RULE: tối đa 5 repo ai_preprocessing trong n_repos.
+
+
+def load_domain_tags(path: Path = DEFAULT_DOMAIN_TAGS_CSV) -> dict[str, str]:
+    """Đọc `selection/domain_tags.csv` (ghi bởi `selection/scan_domains.py`) ->
+    {tên repo: domain_label}. File chưa có (chưa chạy quét tĩnh) thì trả về
+    dict rỗng -- gọi nơi dùng phải coi repo không có trong dict là 'unknown'
+    (KHÔNG chặn pipeline, chỉ mất khả năng cân bằng miền)."""
+    tags: dict[str, str] = {}
+    if not path.exists():
+        logger.warning(
+            "Không thấy %s -- bỏ qua cân bằng miền (mọi repo coi như 'unknown', "
+            "n_repos sẽ lấy đơn thuần theo thứ tự sàng). Chạy "
+            "`python selection/scan_domains.py` trước để có cân bằng miền.", path,
+        )
+        return tags
+    with path.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            tags[row["repo"]] = row.get("domain_label", "unknown")
+    return tags
+
+
+def shuffled_candidates(all_repos: list[Path], seed: int, limit: int) -> list[Path]:
+    """Hoán vị NGẪU NHIÊN CỐ ĐỊNH (seed ghi vào selection.json) của toàn bộ
+    dataset, cắt lấy `limit` ứng viên đầu. `random.Random(seed)` độc lập với
+    hash seed của tiến trình (PYTHONHASHSEED) nên cùng seed luôn ra cùng thứ
+    tự, khác hẳn `sorted(..., key=name)` (thứ tự tên) dùng ở 3 pilot trước."""
+    pool = sorted(all_repos, key=lambda p: p.name)  # nền tất định trước khi xáo
+    rng = random.Random(seed)
+    rng.shuffle(pool)
+    return pool[:limit]
+
+
+def balance_by_domain(
+    accepted: list[tuple[Path, str]], n_repos: int, domain_tags: dict[str, str],
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]], dict]:
+    """Áp bước CÂN BẰNG MIỀN (mục 4) lên tập `accepted` (đã ĐỦ hợp lệ, đúng
+    thứ tự sàng). KHÔNG sàng thêm -- chỉ phân bổ những gì đã có.
+
+    Trả về (selected, backups, domain_composition). `selected`/`backups` giữ
+    NGUYÊN thứ tự sàng ban đầu (dễ đối chiếu với `screened` trong
+    selection.json), không phải thứ tự ai/general tách riêng.
+    """
+    ai_items = [it for it in accepted if domain_tags.get(it[0].name) == "ai_preprocessing"]
+    general_items = [it for it in accepted if domain_tags.get(it[0].name) != "ai_preprocessing"]
+
+    n_ai = min(AI_DOMAIN_QUOTA, len(ai_items))
+    n_general = max(0, n_repos - n_ai)
+
+    chosen_ai = ai_items[:n_ai]
+    chosen_general = general_items[:n_general]
+    chosen_ids = {id(it) for it in chosen_ai + chosen_general}
+
+    selected = [it for it in accepted if id(it) in chosen_ids]
+    backups = [it for it in accepted if id(it) not in chosen_ids]
+
+    composition = {
+        "n_ai_preprocessing_accepted": len(ai_items),
+        "n_general_accepted": len(general_items),
+        "n_ai_preprocessing_selected": len(chosen_ai),
+        "n_general_selected": len(chosen_general),
+        "ai_quota": AI_DOMAIN_QUOTA,
+        "note": (
+            "n_ai_preprocessing_accepted < ai_quota nghĩa là KHÔNG đủ repo "
+            "ai_preprocessing hợp lệ trong lượt sàng này -- đã lấy hết số tìm "
+            "được rồi bù bằng general, đúng quy tắc dự phòng (mục 4), KHÔNG "
+            "phải lỗi."
+        ) if len(ai_items) < AI_DOMAIN_QUOTA else "",
+    }
+    return selected, backups, composition
+
+
 def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = False) -> dict:
     """Sàng rồi chọn mẫu. Trả về dict đủ để ghi vào metadata."""
     from input.intake import IntakeError, resolve_dataset_repos
@@ -235,16 +327,19 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
     n_repos = int(exp.get("n_repos", 12))
     n_backup = int(exp.get("n_backup_repos", 3))
     min_replayable = int(exp.get("min_replayable_hotspots", 2))
+    seed = int(exp.get("sample_seed", 42))
 
     try:
         all_repos = resolve_dataset_repos((cfg.get("dataset") or {}).get("source_root", ""), 0)
     except IntakeError as exc:
         raise SystemExit(f"Không dùng được dataset:\n{exc}") from exc
 
-    # Sắp theo TÊN (không theo kích thước/ngẫu nhiên): thứ tự tất định, ai chạy
-    # lại cũng ra cùng danh sách ứng viên.
-    candidates = sorted(all_repos, key=lambda p: p.name)[:limit]
+    domain_tags = load_domain_tags()
+    candidates = shuffled_candidates(all_repos, seed, limit)
+    n_ai_in_pool = sum(1 for r in candidates if domain_tags.get(r.name) == "ai_preprocessing")
     _banner(f"SÀNG LỌC -- {len(candidates)}/{len(all_repos)} repo ứng viên (chỉ Pha A-B)")
+    print(f"  seed hoán vị: {seed}  (random.Random(seed).shuffle trên {len(all_repos)} repo)")
+    print(f"  pool ứng viên có {n_ai_in_pool}/{len(candidates)} repo gắn nhãn ai_preprocessing")
     print(f"  quy tắc: {SELECTION_RULE}")
     print(f"  cần {n_repos} repo + {n_backup} dự phòng, mỗi repo >= {min_replayable} "
           f"hotspot phát lại được")
@@ -254,11 +349,13 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
     print()
 
     if dry_run:
-        print("  --dry-run: KHÔNG sàng thật. Danh sách ứng viên theo thứ tự tên:")
+        print("  --dry-run: KHÔNG sàng thật. Danh sách ứng viên theo THỨ TỰ ĐÃ HOÁN VỊ:")
         for i, r in enumerate(candidates, 1):
-            print(f"    {i:>3}. {r.name}")
+            tag = domain_tags.get(r.name, "unknown")
+            print(f"    {i:>3}. {r.name}  [{tag}]")
         return {
             "rule": SELECTION_RULE, "dry_run": True,
+            "seed": seed,
             "n_dataset_repos": len(all_repos),
             "screening_limit": limit,
             "n_repos": n_repos,
@@ -266,7 +363,8 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
             "min_replayable_hotspots": min_replayable,
             "sample_size_warning": warn_lines,
             "candidates": [r.name for r in candidates],
-            "selected": [], "backups": [], "rejected": {},
+            "n_ai_preprocessing_in_pool": n_ai_in_pool,
+            "selected": [], "backups": [], "rejected": {}, "domain_composition": {},
         }
 
     accepted: list[tuple[Path, str]] = []
@@ -293,10 +391,21 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
             print(f"\n  đã đủ {need} repo -- dừng sàng ở ứng viên thứ {i}.")
             break
 
-    selected = [r for r, _ in accepted[:n_repos]]
-    backups = [r for r, _ in accepted[n_repos:n_repos + n_backup]]
+    # CÂN BẰNG MIỀN (mục 4) -- áp SAU KHI đã dừng sàng, trên đúng tập `accepted`
+    # đã có (đếm phẳng ở bước dừng trên, KHÔNG sàng thêm để đủ quota miền).
+    selected_items, backup_items, domain_composition = balance_by_domain(
+        accepted, n_repos, domain_tags,
+    )
+    selected = [r for r, _ in selected_items][:n_repos]
+    backups = [r for r, _ in backup_items][:n_backup]
 
     print(f"\n  CHỌN ({len(selected)}): {[r.name for r in selected]}")
+    print(f"    cân bằng miền: {domain_composition['n_ai_preprocessing_selected']} "
+          f"ai_preprocessing + {domain_composition['n_general_selected']} general "
+          f"(có {domain_composition['n_ai_preprocessing_accepted']} ai_preprocessing "
+          f"hợp lệ trong tổng {len(accepted)} repo đã sàng đạt)")
+    if domain_composition["note"]:
+        print(f"    LƯU Ý: {domain_composition['note']}")
     print(f"  DỰ PHÒNG ({len(backups)}): {[r.name for r in backups]}")
     print(f"  LOẠI ({len(rejected)}): xem metadata.json để biết lý do từng repo")
     if len(selected) < n_repos:
@@ -309,6 +418,7 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
     return {
         "rule": SELECTION_RULE,
         "dry_run": False,
+        "seed": seed,
         "n_dataset_repos": len(all_repos),
         "screening_limit": limit,
         "min_replayable_hotspots": min_replayable,
@@ -317,9 +427,11 @@ def select_repos(cfg: dict, results_dir: Path, run_id: str, dry_run: bool = Fals
         "n_backup_repos": n_backup,
         "sample_size_warning": warn_lines,
         "candidates": [r.name for r in candidates],
+        "n_ai_preprocessing_in_pool": n_ai_in_pool,
         "screened": screened,
         "selected": [r.name for r in selected],
         "backups": [r.name for r in backups],
+        "domain_composition": domain_composition,
         "rejected": rejected,
         "_selected_paths": [str(r) for r in selected],
         "_backup_paths": [str(r) for r in backups],

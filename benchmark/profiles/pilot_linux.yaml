@@ -65,30 +65,37 @@ experiment:
   # Tổng thời gian tối đa cho cả lượt chạy. Chạm mốc thì tự dừng và GHI kết quả
   # dở dang chứ không mất trắng -- giờ GPU tính tiền theo giờ.
   max_wall_hours: 6
-  # Số repo ứng viên đem đi sàng (chỉ Pha A-B, không LLM/Rust) trước khi chọn.
+  # LẦN CHẠY 4 (2026-09-30) -- GIỚI HẠN CỨNG 10 repo, mở rộng từ 5 (pilot 1-3).
+  # Đổi thứ tự sàng từ TÊN -> HOÁN VỊ NGẪU NHIÊN CÓ SEED CỐ ĐỊNH (đỡ thiên
+  # lệch alphabet: 3 pilot trước chỉ thấy 25-40 repo ĐẦU BẢNG CHỮ CÁI).
+  # Ghi seed vào selection.json để tái lập được đúng thứ tự đã sàng.
+  sample_seed: 42
+  # Tỉ lệ đạt ĐO ĐƯỢC ở pilot 1 (run_20260928_150827, dataset 171 repo, thứ tự
+  # TÊN -- coi là đặc điểm dataset, không phải vị trí, nên áp lại được cho mẫu
+  # ngẫu nhiên cùng cỡ, xem run_experiment1.py):
   #
-  # 25 ứng viên, và quy mô mẫu được CHỌN THEO TỈ LỆ ĐẠT THẬT ĐÃ ĐO, không phải
-  # theo mong muốn. Số liệu từ pilot 1 (`run_20260928_150827`, dataset 171 repo,
-  # thứ tự tên):
-  #
-  #     trong 10 ứng viên đầu:  3 đạt (30%)
-  #     trong 25 ứng viên đầu:  6 đạt (24%)   <-- quy mô hiện tại
+  #     trong 25 ứng viên đầu:  6 đạt (24%)
+  #     trong 30 ứng viên đầu:  9 đạt (30%)
   #     trong 40 ứng viên đầu: 12 đạt (30%)   <-- pilot 1
   #
   # Lý do bị loại: 16 BASELINE_FAILED, 9 không đủ hotspot phát lại được,
   # 3 INSTALL_FAILED.
   #
-  # VÌ SAO 5+1 CHỨ KHÔNG PHẢI 10+2: với 25 ứng viên, số repo đạt đo được là 6.
-  # Đặt 10+2 (cần 12) thì chắc chắn thiếu -- vừa tốn thời gian sàng hết 25 repo
-  # vừa không đủ số, và lượt chạy kết thúc với mẫu nhỏ hơn dự tính mà không ai
-  # dự đoán trước. 5+1 (cần 6) khớp đúng con số đo được.
-  screening_limit: 25
+  # CẦN 10 + 2 = 12 repo hợp lệ. Với tỉ lệ 24-29%, cần sàng ~41-50 ứng viên để
+  # kỳ vọng đủ 12 (50 * 24% = 12, cận dưới; 50 * 29% ~= 14.5, cận trên) ->
+  # screening_limit=50. SÁT NGƯỠNG ở cận dưới của khoảng ước lượng, không dư --
+  # xem cảnh báo cỡ mẫu in ra khi chạy (warn_if_screening_too_small).
+  screening_limit: 50
   # Quy tắc chọn repo, CỐ ĐỊNH trước khi xem kết quả (xem run_experiment1.py).
   min_replayable_hotspots: 2
-  # SÁT NGƯỠNG: cần 6, ước lượng đạt 6 -> vừa đủ, KHÔNG dư. Một repo đạt mà bị
-  # INSTALL_FAILED ở lượt chính thì repo dự phòng duy nhất bù được; từ repo thứ
-  # hai trở đi thì không còn gì để thay, và pilot sẽ chạy với ít hơn 5 repo.
-  # Đó là hành vi ĐÚNG (chạy với số tìm được, ghi rõ trong metadata), không
-  # phải lỗi -- xem `run_main_phase` và tests/test_pilot_scale.py.
-  n_repos: 5
-  n_backup_repos: 1
+  # DỪNG SÀNG khi đủ 12 repo hợp lệ (đếm phẳng). Sau đó CÂN BẰNG MIỀN: nếu có
+  # >= 5 repo ai_preprocessing hợp lệ, lấy đúng 5 + 5 general; ít hơn thì lấy
+  # hết rồi bù general -- xem balance_by_domain() trong run_experiment1.py và
+  # selection/domain_tags.csv (21/171 repo gắn ai_preprocessing).
+  #
+  # Một repo trong 10 bị INSTALL_FAILED ở lượt chính thì 2 dự phòng bù được;
+  # từ repo thứ ba trở đi thì không còn gì để thay, pilot chạy với ít hơn 10
+  # repo -- hành vi ĐÚNG (chạy với số tìm được, ghi rõ trong metadata), không
+  # phải lỗi.
+  n_repos: 10
+  n_backup_repos: 2
