@@ -101,6 +101,11 @@ class HotspotRecord:
     shadow_mutation: dict | None = None
     """CHẾ ĐỘ BÓNG (mục B2): kết quả mutation test, status = TESTED |
     KHONG_KIEM_DUOC -- xem _replay_runner.py::_generate_mutant_call."""
+    shadow_would_reject: list = field(default_factory=list)
+    """CHẾ ĐỘ BÓNG (mục B7): CHỈ điền khi accepted_round không None -- quy
+    tắc bóng nào (B1-B4) SẼ loại hàm này nếu thi hành nghiêm. Tính ở
+    finish() (audit.shadow_rules.would_shadow_reject), sau khi mọi dữ liệu
+    bóng khác đã có."""
     observed_arg_types: list[str] = field(default_factory=list)
     observed_kwarg_types: dict = field(default_factory=dict)
     # Stage 5
@@ -186,6 +191,7 @@ class HotspotRecord:
             "n_distinct_inputs": self.n_distinct_inputs,
             "nondeterministic_shadow_pil_recheck": self.nondeterministic_shadow_pil_recheck,
             "shadow_mutation": self.shadow_mutation,
+            "shadow_would_reject": self.shadow_would_reject,
             "observed_arg_types": self.observed_arg_types,
             "observed_kwarg_types": self.observed_kwarg_types,
             "compiled": self.compiled,
@@ -257,6 +263,16 @@ def run_repo_pipeline(
         summary["repo_status"] = status
         if note:
             summary["status_note"] = note
+        # mục B7 (CHẾ ĐỘ BÓNG): CHỈ cho hàm đã được CHẤP NHẬN -- tính SAU khi
+        # mọi dữ liệu bóng khác (B1-B4) đã điền xong, TRƯỚC khi serialize.
+        try:
+            from audit.shadow_rules import would_shadow_reject
+
+            for r in records.values():
+                if r.accepted_round is not None:
+                    r.shadow_would_reject = would_shadow_reject(r)
+        except Exception:  # noqa: BLE001 -- quan sát, không được làm hỏng finish()
+            logger.exception("audit.shadow_rules.would_shadow_reject lỗi -- bỏ qua.")
         summary["hotspots"] = [r.as_dict() for r in records.values()]
         # ------------------------------------- AUDIT_RUN4_v2 mục 5, điểm 2
         # `finish()` là điểm thoát DUY NHẤT nên bắt được MỌI đường ra (kể cả
