@@ -26,3 +26,10 @@ lúc nào) -- không phải nhật ký công việc đầy đủ. Chi tiết t�
   trên dataset thật (171 repo) tại máy dev Windows -- PASS. Phần "sàng thật"
   (chạy Pha A-B thật trên 50 repo) CHƯA chạy ở đây -- để dành cho máy Linux
   thuê (xem `selection/SELECTION_REPORT.md` mục rủi ro/kế hoạch).
+- **Sửa lần 2 (cùng ngày)**: đổi cơ chế sàng từ "phẳng rồi cân bằng miền SAU"
+  sang "sàng 2 giai đoạn theo miền" -- giai đoạn 1 sàng TOÀN BỘ 20 repo
+  `ai_preprocessing` (đã loại `mgedmin_check-manifest`) trước, dừng khi đủ
+  quota 5; giai đoạn 2 mới sàng `general`. Thêm
+  `selection/domain_exclusions.txt` (danh sách loại tay, dễ sửa không cần
+  đụng code) và `tests/test_ai_first_screening.py` (unit test cho
+  `_screen_stream()`, dữ liệu giả, không cần dataset thật). Test PASS.

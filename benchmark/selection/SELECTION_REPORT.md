@@ -37,7 +37,9 @@ ghi lại để người đọc tự cân nhắc):
 - `mgedmin_check-manifest` có 4047 file `.py` (bất thường so với trung vị 19
   file/repo) và được gắn `ai_preprocessing` (khớp `PIL;numpy`) -- nghi là do
   bộ test của nó tự sinh hàng loạt cây thư mục dự án giả, không phải repo
-  CV/NLP thật. Nếu lọt vào 10 repo chọn, nên xem lại thủ công.
+  CV/NLP thật. **Đã loại khỏi candidate pool** qua
+  `selection/domain_exclusions.txt` (xem mục 3) -- không chỉ hạ xuống
+  `general`, mà loại hẳn khỏi cả 2 dòng sàng.
 - `BBuf_onnx_learn` KHÔNG được gắn `ai_preprocessing` dù tên gợi ý ONNX/deep
   learning -- file của nó chỉ import module nội bộ (`tools`, `onnxapi`,
   `convert2onnx`), không khớp danh sách 11 thư viện (không có `onnx`/
@@ -46,19 +48,37 @@ ghi lại để người đọc tự cân nhắc):
 ## 3. Cơ chế chọn mẫu
 
 Thay đổi so với pilot 1-3 (sắp theo TÊN, thiên lệch alphabet -- 3 pilot trước
-chỉ từng thấy các repo đầu bảng chữ cái):
+chỉ từng thấy các repo đầu bảng chữ cái). **Sửa lần 2 (cùng ngày 2026-09-30)**:
+đổi từ "sàng phẳng rồi cân bằng miền SAU" sang "sàng 2 GIAI ĐOẠN theo miền",
+vì cách cũ để quota 5 ai_preprocessing phụ thuộc may rủi (chỉ ~12% dataset
+thuộc miền này, có thể không đủ vị trí trong 50 ứng viên đầu của hoán vị
+phẳng).
 
 1. **Hoán vị ngẫu nhiên có seed cố định**: `random.Random(42).shuffle()` trên
-   toàn bộ 171 repo, ghi `seed=42` vào `selection.json` để tái lập đúng thứ
-   tự. Sàng tối đa `screening_limit=50` ứng viên đầu theo thứ tự đã hoán vị.
-2. **Điều kiện nhận** (giữ nguyên như 3 pilot trước): bộ test Python gốc chạy
-   được (pass ≥1 test) VÀ ≥2 hotspot ghi + phát lại được đối số thật.
-3. **Dừng sàng** khi đủ 12 repo hợp lệ (10 + 2 dự phòng), đếm phẳng, CHƯA xét
-   miền.
-4. **Cân bằng miền** (áp SAU khi dừng sàng, trên đúng tập đã tìm được): nếu
-   có ≥5 repo `ai_preprocessing` hợp lệ, lấy đúng 5 + 5 `general` làm 10 repo
-   chính; nếu ít hơn 5, lấy HẾT số đó rồi bù bằng `general` cho đủ 10. Phần
-   dư (không rơi vào 10) làm dự phòng, không phân biệt miền.
+   TOÀN BỘ 171 repo, ghi `seed=42` vào `selection.json` để tái lập đúng thứ tự.
+2. **Loại tay**: bỏ khỏi TOÀN BỘ candidate pool các repo trong
+   `selection/domain_exclusions.txt` (hiện có `mgedmin_check-manifest` --
+   xem mục 2). Thêm dòng mới vào file này khi rà tay phát hiện repo khác cần
+   loại, không cần sửa code.
+3. **Tách 2 dòng theo miền** (giữ nguyên thứ tự hoán vị bên trong mỗi dòng):
+   dòng `ai_preprocessing` (20 repo, sau khi loại tay) và dòng `general`.
+4. **Giai đoạn 1 -- AI-first**: sàng dòng `ai_preprocessing` theo thứ tự,
+   DỪNG khi đủ 5 repo hợp lệ (quota tối đa) HOẶC hết dòng HOẶC chạm
+   `screening_limit=50`. Không đủ 5 thì lấy hết số tìm được (đã sàng HẾT cả
+   dòng, không phải do vị trí xui rủi).
+5. **Giai đoạn 2 -- general**: sàng tiếp dòng `general` theo thứ tự, DỪNG khi
+   TỔNG (2 giai đoạn) đủ 12 (10 + 2 dự phòng) HOẶC hết dòng HOẶC chạm
+   `screening_limit`.
+6. **Điều kiện nhận 1 repo** (giữ nguyên như 3 pilot trước, áp cho cả 2 giai
+   đoạn): bộ test Python gốc chạy được (pass ≥1 test) VÀ ≥2 hotspot ghi +
+   phát lại được đối số thật.
+7. **10 repo chính** = 5 (hoặc ít hơn, nếu không đủ) đầu tiên tìm được ở giai
+   đoạn 1 + phần còn lại lấy từ giai đoạn 2, theo đúng thứ tự tìm được. Phần
+   hợp lệ còn dư làm 2 dự phòng, không phân biệt miền.
+
+`selection.json` ghi `phases.ai_first` / `phases.general` (số ứng viên, số đã
+sàng, số hợp lệ, lý do dừng) và trường `phase` trên từng mục trong `screened`
+-- đọc lại được CHÍNH XÁC vì sao dừng ở đâu, không chỉ con số cuối cùng.
 
 **Cỡ mẫu**: cần 10 + 2 = 12 repo hợp lệ. Với tỉ lệ đạt 24-30% đo được ở pilot
 1 (dataset 171 repo, coi là đặc điểm dataset chứ không phải vị trí trong danh
@@ -87,22 +107,28 @@ khi có số liệu từ lượt sàng 50 repo của lần chạy 4.
   yếu hoặc đối số khó ghi lại sẽ bị loại một cách có hệ thống, KHÔNG phải
   ngẫu nhiên -- mẫu cuối không đại diện cho "độ khó dịch" trung bình của
   dataset.
-- **Hoán vị ngẫu nhiên chỉ phủ ~29% dataset**: `screening_limit=50` trên 171
-  repo nghĩa là ~71% dataset không bao giờ có cơ hội được sàng ở lần chạy
-  này, kể cả khi seed khác đi thì cũng chỉ đổi TẬP 50 repo được xét, không
-  phải toàn bộ 171.
-- **Quota cân bằng miền có thể không đạt được**: chỉ 21/171 (~12%) repo gắn
-  `ai_preprocessing`. Trong 50 ứng viên ngẫu nhiên, kỳ vọng chỉ ~6 repo thuộc
-  miền này xuất hiện; với tỉ lệ đạt 24-30%, kỳ vọng THỰC TẾ chỉ **1-2 repo
-  ai_preprocessing hợp lệ**, thấp hơn quota 5. Nhiều khả năng lần chạy 4 sẽ
-  rơi vào nhánh "lấy hết rồi bù general" chứ không đạt đúng 5+5 -- đây là hệ
-  quả DỰ KIẾN của cỡ mẫu nhỏ so với tỉ lệ hiếm của miền này, không phải lỗi
-  thuật toán.
+- **Hoán vị ngẫu nhiên chỉ phủ 1 phần dataset**: dòng `ai_preprocessing`
+  (20 repo) được sàng TOÀN BỘ (sửa lần 2 -- xem mục 3), nên miền này không
+  còn phụ thuộc vị trí trong hoán vị. Dòng `general` (150 repo) thì vẫn chỉ
+  sàng tới khi đủ quota hoặc chạm phần `screening_limit` còn lại (~30 repo
+  general, sau khi trừ phần đã dùng cho giai đoạn AI) -- phần lớn dataset
+  `general` vẫn không có cơ hội được sàng ở lần chạy này.
+- **Quota 5 ai_preprocessing có thể vẫn không đạt được, dù đã sàng HẾT dòng
+  AI**: chỉ 20 repo (sau khi loại `mgedmin_check-manifest`) thuộc miền này.
+  Với tỉ lệ đạt 24-30% đo được ở dataset nói chung, kỳ vọng chỉ **~5-6 repo
+  ai_preprocessing hợp lệ trong toàn bộ 20** -- SÁT quota 5, không dư. Nếu tỉ
+  lệ đạt thực tế của riêng miền `ai_preprocessing` thấp hơn mức trung bình
+  dataset (chưa có số đo riêng), lần chạy 4 vẫn có thể rơi vào nhánh "lấy hết
+  rồi bù general" -- nhưng khác với thiết kế cũ, đây sẽ là kết luận CÓ CĂN CỨ
+  (đã thử hết 20 repo) chứ không phải do vị trí xui rủi trong 1 hoán vị
+  phẳng.
 - **7/171 repo** có ≥1 file `.py` không `ast.parse` được (cú pháp lạ, có thể
   Python 2) -- không chặn gì, chỉ làm giảm độ chính xác gắn nhãn miền cho
   đúng 7 repo đó (`selection/domain_tags.csv`, cột `n_unparseable`).
-- **`mgedmin_check-manifest`** (xem mục 2) -- nếu vào mẫu chính, cần ghi rõ
-  trong luận văn là nhãn `ai_preprocessing` có thể là dương tính giả.
+- **`mgedmin_check-manifest`**: đã loại khỏi candidate pool (xem mục 2, 3) --
+  không còn rủi ro lọt vào mẫu, nhưng cần ghi trong luận văn LÝ DO loại (nhãn
+  `ai_preprocessing` là dương tính giả) để người đọc hiểu vì sao 1 repo bị
+  loại thủ công thay vì qua quy trình sàng tự động.
 
 ## 6. Trạng thái hiện tại
 

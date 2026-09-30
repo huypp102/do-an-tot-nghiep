@@ -191,8 +191,13 @@ else:
               str(sel.get("n_backup_repos")))
         check(sel.get("seed") == 42, "selection.json ghi seed=42",
               str(sel.get("seed")))
-        check("n_ai_preprocessing_in_pool" in sel,
-              "selection.json ghi so repo ai_preprocessing trong pool ung vien")
+        check("n_ai_preprocessing_candidates" in sel,
+              "selection.json ghi so repo ai_preprocessing trong dong AI-first")
+        check(sel.get("n_excluded") == 1 and sel.get("excluded_repos") == ["mgedmin_check-manifest"],
+              "selection.json ghi dung 1 repo bi loai tay (mgedmin_check-manifest)",
+              f"n_excluded={sel.get('n_excluded')} excluded_repos={sel.get('excluded_repos')}")
+        check("mgedmin_check-manifest" not in (sel.get("candidates") or []),
+              "repo bi loai tay KHONG xuat hien trong danh sach ung vien")
         check(bool(sel.get("sample_size_warning")),
               "canh bao co mau duoc GHI vao selection.json (doc lai duoc sau)")
         # Hoan vi phai KHAC thu tu ten -- bang chung day la ngau nhien that,

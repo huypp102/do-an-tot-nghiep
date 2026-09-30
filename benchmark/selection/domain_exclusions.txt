@@ -1,0 +1,14 @@
+# Repo LOẠI KHỎI diện ai_preprocessing khi sàng cho lần chạy 4, dù
+# selection/domain_tags.csv gắn nhãn ai_preprocessing (dương tính giả, hoặc
+# quyết định thủ công sau khi rà tay). Bị loại KHỎI TOÀN BỘ (không rơi vào
+# dòng general) -- đây là "loại", không phải "hạ xuống general".
+#
+# Định dạng: 1 tên repo mỗi dòng (đúng tên thư mục trong source_projects/
+# Python), dòng bắt đầu bằng # là chú thích, dòng trống bị bỏ qua. Thêm dòng
+# mới khi rà tay phát hiện repo khác cần loại -- không cần sửa code.
+
+# 4047 file .py -- nghi do bộ test tự sinh hàng loạt cây thư mục dự án giả
+# để kiểm manifest, không phải repo CV/NLP thật. Khớp nhãn ai_preprocessing
+# chỉ vì 1-2 file fixture ngẫu nhiên import PIL/numpy. Xem SELECTION_REPORT.md
+# mục 2.
+mgedmin_check-manifest
